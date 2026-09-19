@@ -87,4 +87,30 @@ void bf16_gdn_gating_proj_35_mma_unsplit_launch(Bf16GdnGatingTokenVariant varian
                                                 const Tensor& A_log, const Tensor& dt_bias,
                                                 Tensor& g, Tensor& beta, cudaStream_t stream);
 
+// Qwen3.5-9B geometry (hidden 4096, 32 heads) — same schedules as the 35B tables.
+void bf16_gdn_gating_proj_9_mma_split16_launch(Bf16GdnGatingTokenVariant variant, const Tensor& x,
+                                               const Weight& a_weight, const Weight& b_weight,
+                                               const Tensor& A_log, const Tensor& dt_bias,
+                                               void* workspace, Tensor& g, Tensor& beta,
+                                               cudaStream_t stream);
+void bf16_gdn_gating_proj_9_mma_split8_launch(Bf16GdnGatingTokenVariant variant, const Tensor& x,
+                                              const Weight& a_weight, const Weight& b_weight,
+                                              const Tensor& A_log, const Tensor& dt_bias,
+                                              void* workspace, Tensor& g, Tensor& beta,
+                                              cudaStream_t stream);
+void bf16_gdn_gating_proj_9_mma_split4_launch(Bf16GdnGatingTokenVariant variant, const Tensor& x,
+                                              const Weight& a_weight, const Weight& b_weight,
+                                              const Tensor& A_log, const Tensor& dt_bias,
+                                              void* workspace, Tensor& g, Tensor& beta,
+                                              cudaStream_t stream);
+void bf16_gdn_gating_proj_9_mma_split2_launch(Bf16GdnGatingTokenVariant variant, const Tensor& x,
+                                              const Weight& a_weight, const Weight& b_weight,
+                                              const Tensor& A_log, const Tensor& dt_bias,
+                                              void* workspace, Tensor& g, Tensor& beta,
+                                              cudaStream_t stream);
+void bf16_gdn_gating_proj_9_mma_unsplit_launch(Bf16GdnGatingTokenVariant variant, const Tensor& x,
+                                               const Weight& a_weight, const Weight& b_weight,
+                                               const Tensor& A_log, const Tensor& dt_bias, Tensor& g,
+                                               Tensor& beta, cudaStream_t stream);
+
 } // namespace ninfer::ops::detail

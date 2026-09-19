@@ -16,7 +16,10 @@ namespace ninfer {
 
 using TokenId = std::int32_t;
 
-inline constexpr std::uint32_t kMaximumConcurrency = 8;
+// Lane ceiling for engine state arrays. The serve-level --max-concurrency
+// flag is validated against this, but the real limit is KV pool + lane
+// runtime memory (each lane costs state pools + CUDA-graph allowance).
+inline constexpr std::uint32_t kMaximumLanes = 64;
 
 enum class KvCacheStorage : std::uint8_t {
     BFloat16,

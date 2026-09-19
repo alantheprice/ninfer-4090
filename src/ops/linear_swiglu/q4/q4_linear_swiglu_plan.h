@@ -46,4 +46,9 @@ void q4_linear_swiglu_execute_plan(const Q4LinearSwiGluPlan& plan, const Tensor&
 void q4_linear_swiglu_dispatch(const Tensor& x, const Weight& w, Tensor& out, WorkspaceArena& ws,
                                cudaStream_t stream);
 
+void q4_linear_swiglu_gemv_pair_launch_9b(const Tensor& x, const Weight& w, Tensor& out,
+                                          cudaStream_t stream);
+void q4_linear_swiglu_small_t_exact_launch_9b(const Tensor& x, const Weight& w, Tensor& out,
+                                              cudaStream_t stream);
+
 } // namespace ninfer::ops::detail

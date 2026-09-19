@@ -35,7 +35,8 @@ RowSplitGroupedMmaJob make_job(const Weight& weight, std::int32_t weight_row_off
 
 void launch_slice(bool full, const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
                   Tensor& qkv, Tensor& z, cudaStream_t stream) {
-    constexpr std::int32_t kValueRows = 6144;
+    // 27B: 6144 value rows; Qwen3.5-9B: 4096 value rows (32 value heads x 128).
+    const std::int32_t kValueRows = qk_weight.padded_shape[1] == 4096 ? 4096 : 6144;
     using Schedule                    = GemmCfg<64, 128, 64, 32, 32, 2, 1, false, true, true>;
     const RowSplitGroupedMmaJob qk    = make_job(qk_weight, 0, qk_weight.n, qkv, 0);
     const RowSplitGroupedMmaJob value = make_job(value_z_weight, 0, kValueRows, qkv, qk_weight.n);

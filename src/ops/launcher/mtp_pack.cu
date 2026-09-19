@@ -30,13 +30,21 @@ void mtp_pack_fc_input_launch(const Tensor& embedding_norm, const Tensor& hidden
 void mtp_split_attn_in_launch(const Tensor& attn_in, Tensor& q, Tensor& k, Tensor& gate, Tensor& v,
                               cudaStream_t stream) {
     constexpr int kBlock = 256;
-    const std::int64_t n = static_cast<std::int64_t>(attn_in.ne[0]) * attn_in.ne[1];
+    const std::int32_t rows = attn_in.ne[0];
+    const std::int64_t n = static_cast<std::int64_t>(rows) * attn_in.ne[1];
     const int grid =
         static_cast<int>(std::max<std::int64_t>(1, div_up(n, static_cast<std::int64_t>(kBlock))));
-    mtp_split_attn_in_kernel<<<grid, kBlock, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(attn_in.data), static_cast<__nv_bfloat16*>(q.data),
-        static_cast<__nv_bfloat16*>(k.data), static_cast<__nv_bfloat16*>(gate.data),
-        static_cast<__nv_bfloat16*>(v.data), attn_in.ne[1]);
+    if (rows == kMtpAttnRows9B) {
+        mtp_split_attn_in_kernel<kMtpAttnRows9B, kMtpQRows9B><<<grid, kBlock, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(attn_in.data), static_cast<__nv_bfloat16*>(q.data),
+            static_cast<__nv_bfloat16*>(k.data), static_cast<__nv_bfloat16*>(gate.data),
+            static_cast<__nv_bfloat16*>(v.data), attn_in.ne[1]);
+    } else {
+        mtp_split_attn_in_kernel<kMtpAttnRows27, kMtpQRows27><<<grid, kBlock, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(attn_in.data), static_cast<__nv_bfloat16*>(q.data),
+            static_cast<__nv_bfloat16*>(k.data), static_cast<__nv_bfloat16*>(gate.data),
+            static_cast<__nv_bfloat16*>(v.data), attn_in.ne[1]);
+    }
     CUDA_CHECK(cudaGetLastError());
 }
 

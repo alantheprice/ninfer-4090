@@ -30,6 +30,8 @@ struct RouteSpec {
 };
 
 constexpr Q4LinearSwiGluProblem kShape{34816, 17408, 5120, 5120, 1};
+// Qwen3.5-9B: intermediate 12288 (gate_up 24576), hidden 4096.
+constexpr Q4LinearSwiGluProblem kShape9B{24576, 12288, 4096, 4096, 1};
 
 constexpr std::array<RouteSpec, 10> kRoutes{{
     {{1, 1}, Q4LinearSwiGluScheduleId::GemvPair},
@@ -57,9 +59,13 @@ constexpr bool catalog_is_closed() noexcept {
 static_assert(catalog_is_closed(), "Q4 LinearSwiGLU routes must be exact, contiguous, and closed");
 
 bool supported_shape(const Q4LinearSwiGluProblem& problem) noexcept {
-    return problem.gate_up_rows == kShape.gate_up_rows &&
-           problem.output_rows == kShape.output_rows && problem.k == kShape.k &&
-           problem.padded_k == kShape.padded_k;
+    const bool is27 = problem.gate_up_rows == kShape.gate_up_rows &&
+                      problem.output_rows == kShape.output_rows && problem.k == kShape.k &&
+                      problem.padded_k == kShape.padded_k;
+    const bool is9b = problem.gate_up_rows == kShape9B.gate_up_rows &&
+                      problem.output_rows == kShape9B.output_rows && problem.k == kShape9B.k &&
+                      problem.padded_k == kShape9B.padded_k;
+    return is27 || is9b;
 }
 
 template <class Allocator>
@@ -156,10 +162,12 @@ void q4_linear_swiglu_execute_plan(const Q4LinearSwiGluPlan& plan, const Tensor&
 
     switch (plan.schedule) {
     case Q4LinearSwiGluScheduleId::GemvPair:
-        q4_linear_swiglu_gemv_pair_launch(x, w, out, stream);
+        if (problem.k == 4096) { q4_linear_swiglu_gemv_pair_launch_9b(x, w, out, stream); }
+        else { q4_linear_swiglu_gemv_pair_launch(x, w, out, stream); }
         return;
     case Q4LinearSwiGluScheduleId::SmallTExact:
-        q4_linear_swiglu_small_t_exact_launch(x, w, out, stream);
+        if (problem.k == 4096) { q4_linear_swiglu_small_t_exact_launch_9b(x, w, out, stream); }
+        else { q4_linear_swiglu_small_t_exact_launch(x, w, out, stream); }
         return;
     case Q4LinearSwiGluScheduleId::MmaSplitHalfPairR32C40:
         q4_linear_swiglu_mma_split_half_pair_r32_c40_launch(x, w, out, stream);

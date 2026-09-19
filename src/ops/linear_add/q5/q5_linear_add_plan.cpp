@@ -31,15 +31,33 @@ struct RouteSpec {
     Q5LinearAddScheduleId schedule;
 };
 
-constexpr std::array<SupportSpec, 2> kSupports{{
+constexpr std::array<SupportSpec, 4> kSupports{{
     {5120, 6144, 6144},
     {5120, 17408, 17408},
+    {4096, 4096, 4096},
+    {4096, 12288, 12288},
 }};
 
 constexpr std::array<RouteSpec, 6> kK6144Routes{{
     {{1, 1}, Q5LinearAddScheduleId::GemvResidual},
     {{2, 13}, Q5LinearAddScheduleId::Split2ExactResidual},
     {{14, 16}, Q5LinearAddScheduleId::MmaResidualR64C16},
+    {{17, 64}, Q5LinearAddScheduleId::MmaResidualR64C32},
+    {{65, 128}, Q5LinearAddScheduleId::MmaResidualR64C64},
+    {{129, kAnyCols}, Q5LinearAddScheduleId::MmaResidualR64C128},
+}};
+
+constexpr std::array<RouteSpec, 5> kK4096Routes{{
+    {{1, 1}, Q5LinearAddScheduleId::GemvResidual},
+    {{2, 13}, Q5LinearAddScheduleId::Split2ExactResidual},
+    {{14, 16}, Q5LinearAddScheduleId::MmaResidualR64C16},
+    {{17, 64}, Q5LinearAddScheduleId::MmaResidualR64C32},
+    {{65, kAnyCols}, Q5LinearAddScheduleId::MmaResidualR64C128},
+}};
+
+constexpr std::array<RouteSpec, 5> kK12288Routes{{
+    {{1, 1}, Q5LinearAddScheduleId::GemvResidual},
+    {{2, 16}, Q5LinearAddScheduleId::Split2ExactResidual},
     {{17, 64}, Q5LinearAddScheduleId::MmaResidualR64C32},
     {{65, 128}, Q5LinearAddScheduleId::MmaResidualR64C64},
     {{129, kAnyCols}, Q5LinearAddScheduleId::MmaResidualR64C128},
@@ -64,7 +82,8 @@ constexpr bool catalog_is_closed(const std::array<RouteSpec, N>& routes) noexcep
            expected == static_cast<std::int64_t>(kAnyCols) + 1;
 }
 
-static_assert(catalog_is_closed(kK6144Routes) && catalog_is_closed(kK17408Routes),
+static_assert(catalog_is_closed(kK6144Routes) && catalog_is_closed(kK17408Routes) &&
+                  catalog_is_closed(kK4096Routes) && catalog_is_closed(kK12288Routes),
               "Q5 LinearAdd routes must be exact, contiguous, and closed");
 
 bool supported_shape(const Q5LinearAddProblem& problem) noexcept {
@@ -114,7 +133,13 @@ Q5LinearAddPlan q5_linear_add_resolve_plan(const Q5LinearAddProblem& problem) {
         }
         throw std::logic_error("q5 linear_add: admitted problem has no covering route");
     };
-    return problem.k == 6144 ? resolve_from(kK6144Routes) : resolve_from(kK17408Routes);
+    switch (problem.k) {
+    case 4096: return resolve_from(kK4096Routes);
+    case 6144: return resolve_from(kK6144Routes);
+    case 12288: return resolve_from(kK12288Routes);
+    case 17408: return resolve_from(kK17408Routes);
+    }
+    throw std::logic_error("q5 linear_add: unsupported K");
 }
 
 std::size_t q5_linear_add_capacity_workspace_bytes(std::int32_t rows, std::int32_t k,

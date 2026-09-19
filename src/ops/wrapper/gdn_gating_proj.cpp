@@ -80,13 +80,16 @@ void gdn_gating_proj(const Tensor& x, const Weight& a_weight, const Weight& b_we
                      Tensor& beta, cudaStream_t stream) {
     constexpr const char* op  = "gdn_gating_proj";
     const std::int32_t tokens = x.ne[1];
-    require_sequence_tensor(x, DType::BF16, 5120, tokens, op, "x");
-    require_vector_tensor(A_log, DType::FP32, 48, op, "A_log");
-    require_vector_tensor(dt_bias, DType::FP32, 48, op, "dt_bias");
-    require_sequence_tensor(g, DType::FP32, 48, tokens, op, "g");
-    require_sequence_tensor(beta, DType::FP32, 48, tokens, op, "beta");
-    require_bf16_weight(a_weight, 48, 5120, "a_weight");
-    require_bf16_weight(b_weight, 48, 5120, "b_weight");
+    // Two admitted geometries: 27B (hidden 5120, 48 heads), 9B (hidden 4096, 32 heads).
+    const std::int32_t hidden = x.ne[0];
+    const std::int32_t heads  = hidden == 5120 ? 48 : 32;
+    require_sequence_tensor(x, DType::BF16, hidden, tokens, op, "x");
+    require_vector_tensor(A_log, DType::FP32, heads, op, "A_log");
+    require_vector_tensor(dt_bias, DType::FP32, heads, op, "dt_bias");
+    require_sequence_tensor(g, DType::FP32, heads, tokens, op, "g");
+    require_sequence_tensor(beta, DType::FP32, heads, tokens, op, "beta");
+    require_bf16_weight(a_weight, heads, hidden, "a_weight");
+    require_bf16_weight(b_weight, heads, hidden, "b_weight");
 
     detail::bf16_gdn_gating_dispatch(x, a_weight, b_weight, A_log, dt_bias, ws, g, beta, stream);
 }
@@ -117,15 +120,18 @@ void gdn_norm_gating_proj(const Tensor& x, const Tensor& norm_weight, float eps,
     if (!(eps > 0.0F) || !std::isfinite(eps)) {
         throw std::invalid_argument("gdn_norm_gating_proj: eps must be positive and finite");
     }
-    require_sequence_tensor(x, DType::BF16, 5120, tokens, op, "x");
-    require_vector_tensor(norm_weight, DType::BF16, 5120, op, "norm_weight");
-    require_sequence_tensor(h, DType::BF16, 5120, tokens, op, "h");
-    require_vector_tensor(A_log, DType::FP32, 48, op, "A_log");
-    require_vector_tensor(dt_bias, DType::FP32, 48, op, "dt_bias");
-    require_sequence_tensor(g, DType::FP32, 48, tokens, op, "g");
-    require_sequence_tensor(beta, DType::FP32, 48, tokens, op, "beta");
-    require_bf16_weight(a_weight, 48, 5120, "a_weight");
-    require_bf16_weight(b_weight, 48, 5120, "b_weight");
+    // Two admitted geometries: 27B (hidden 5120, 48 heads), 9B (hidden 4096, 32 heads).
+    const std::int32_t hidden = x.ne[0];
+    const std::int32_t heads  = hidden == 5120 ? 48 : 32;
+    require_sequence_tensor(x, DType::BF16, hidden, tokens, op, "x");
+    require_vector_tensor(norm_weight, DType::BF16, hidden, op, "norm_weight");
+    require_sequence_tensor(h, DType::BF16, hidden, tokens, op, "h");
+    require_vector_tensor(A_log, DType::FP32, heads, op, "A_log");
+    require_vector_tensor(dt_bias, DType::FP32, heads, op, "dt_bias");
+    require_sequence_tensor(g, DType::FP32, heads, tokens, op, "g");
+    require_sequence_tensor(beta, DType::FP32, heads, tokens, op, "beta");
+    require_bf16_weight(a_weight, heads, hidden, "a_weight");
+    require_bf16_weight(b_weight, heads, hidden, "b_weight");
 
     detail::bf16_gdn_norm_gating_dispatch(x, norm_weight, eps, h, a_weight, b_weight, A_log,
                                           dt_bias, ws, g, beta, stream);

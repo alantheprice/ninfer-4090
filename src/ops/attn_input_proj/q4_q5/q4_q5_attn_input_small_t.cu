@@ -19,13 +19,12 @@
 namespace ninfer::ops::detail {
 namespace {
 
-constexpr std::int32_t kParentRows = 7168;
-constexpr std::int32_t kSplitRow   = 6144;
-constexpr std::int32_t kHidden     = 5120;
+
 
 using Q4AttnSimtR8C4Schedule = Q4RowSplitSimtGemmSchedule<8, 4, 16, 2, Cache::ca, 1>;
 using Q4AttnSimtR8C8Schedule = Q4RowSplitSimtGemmSchedule<8, 8, 16, 2, Cache::ca, 1>;
 
+template <int kParentRows, int kSplitRow, int kHidden>
 void launch_q4_gemv(const Tensor& x, const Weight& weight, Tensor& q, Tensor& key,
                     cudaStream_t stream) {
     using Schedule = Q4GemvR1W8DirectSchedule;
@@ -38,7 +37,7 @@ void launch_q4_gemv(const Tensor& x, const Weight& weight, Tensor& q, Tensor& ke
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <class Schedule, bool Full>
+template <int kParentRows, int kSplitRow, int kHidden, class Schedule, bool Full>
 void launch_q4_simt(const Tensor& x, const Weight& weight, Tensor& q, Tensor& key,
                     cudaStream_t stream) {
     const std::int32_t cols = x.ne[1];
@@ -54,20 +53,20 @@ void launch_q4_simt(const Tensor& x, const Weight& weight, Tensor& q, Tensor& ke
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <class Schedule>
+template <int kParentRows, int kSplitRow, int kHidden, class Schedule>
 void launch_q4_simt_route(const Tensor& x, const Weight& weight, Tensor& q, Tensor& key,
                           cudaStream_t stream) {
     const bool full = (kParentRows % Schedule::kRowsPerCta) == 0 &&
                       ((kHidden / Q4RowSplitStorage::kGroupK) % Schedule::kGroupsPerStage) == 0 &&
                       (x.ne[1] % Schedule::kColsPerTile) == 0;
     if (full) {
-        launch_q4_simt<Schedule, true>(x, weight, q, key, stream);
+        launch_q4_simt<kParentRows, kSplitRow, kHidden, Schedule, true>(x, weight, q, key, stream);
     } else {
-        launch_q4_simt<Schedule, false>(x, weight, q, key, stream);
+        launch_q4_simt<kParentRows, kSplitRow, kHidden, Schedule, false>(x, weight, q, key, stream);
     }
 }
 
-template <int ActiveCols>
+template <int kParentRows, int kSplitRow, int kHidden, int ActiveCols>
 void launch_q4_attn_small_t_mma_active(const Tensor& x, const Weight& weight, Tensor& q,
                                        Tensor& key, cudaStream_t stream) {
     constexpr int TileCols = ActiveCols <= 8 ? 8 : 16;
@@ -90,27 +89,30 @@ void launch_q4_attn_small_t_mma_active(const Tensor& x, const Weight& weight, Te
 
 using Q4AttnSmallTLauncher = void (*)(const Tensor&, const Weight&, Tensor&, Tensor&, cudaStream_t);
 
-template <std::size_t... Offsets>
+template <int kParentRows, int kSplitRow, int kHidden, std::size_t... Offsets>
 constexpr auto make_q4_attn_small_t_launchers(std::index_sequence<Offsets...>) {
     return std::array<Q4AttnSmallTLauncher, sizeof...(Offsets)>{
-        &launch_q4_attn_small_t_mma_active<2 + static_cast<int>(Offsets)>...};
+        &launch_q4_attn_small_t_mma_active<kParentRows, kSplitRow, kHidden,
+                                           2 + static_cast<int>(Offsets)>...};
 }
 
-constexpr auto kQ4AttnSmallTLaunchers =
-    make_q4_attn_small_t_launchers(std::make_index_sequence<15>{}); // 2..16
-
+template <int kParentRows, int kSplitRow, int kHidden>
 void launch_q4(const Tensor& x, const Weight& weight, Tensor& q, Tensor& key, cudaStream_t stream) {
     if (x.ne[1] == 1) {
-        launch_q4_gemv(x, weight, q, key, stream);
+        launch_q4_gemv<kParentRows, kSplitRow, kHidden>(x, weight, q, key, stream);
         return;
     }
     if (x.ne[1] <= 16) {
-        kQ4AttnSmallTLaunchers[static_cast<std::size_t>(x.ne[1] - 2)](x, weight, q, key, stream);
+        constexpr auto launchers =
+            make_q4_attn_small_t_launchers<kParentRows, kSplitRow, kHidden>(
+                std::make_index_sequence<15>{}); // 2..16
+        launchers[static_cast<std::size_t>(x.ne[1] - 2)](x, weight, q, key, stream);
         return;
     }
     throw std::invalid_argument("attention Q4 split-output requires T in [1,16]");
 }
 
+template <int kParentRows, int kSplitRow, int kHidden>
 void launch_q5_gemv(const Tensor& x, const Weight& weight, Tensor& gate, Tensor& value,
                     cudaStream_t stream) {
     constexpr int kRowsPerBlock = 16;
@@ -126,7 +128,7 @@ void launch_q5_gemv(const Tensor& x, const Weight& weight, Tensor& gate, Tensor&
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <int Cols>
+template <int kParentRows, int kSplitRow, int kHidden, int Cols>
 void launch_q5_split4_rows(const Tensor& x, const Weight& weight, Tensor& gate, Tensor& value,
                            cudaStream_t stream) {
     constexpr int kThreads = 4 * 32;
@@ -138,11 +140,11 @@ void launch_q5_split4_rows(const Tensor& x, const Weight& weight, Tensor& gate, 
         static_cast<const std::uint8_t*>(weight.qhigh),
         static_cast<const std::uint8_t*>(weight.scales), static_cast<__nv_bfloat16*>(gate.data),
         static_cast<__nv_bfloat16*>(value.data), kParentRows, gate.ne[0], kHidden, Cols,
-        weight.padded_shape[1], 5);
+        weight.padded_shape[1], kHidden / 1024);
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <int Cols>
+template <int kParentRows, int kSplitRow, int kHidden, int Cols>
 void launch_q5_split4(const Tensor& x, const Weight& weight, Tensor& gate, Tensor& value,
                       cudaStream_t stream) {
     // Same eight-column crossover as the GDN value_z projection.
@@ -159,64 +161,65 @@ void launch_q5_split4(const Tensor& x, const Weight& weight, Tensor& gate, Tenso
                                         static_cast<const std::uint8_t*>(weight.scales),
                                         static_cast<__nv_bfloat16*>(gate.data),
                                         static_cast<__nv_bfloat16*>(value.data), kParentRows,
-                                        gate.ne[0], kHidden, Cols, weight.padded_shape[1], 5);
+                                        gate.ne[0], kHidden, Cols, weight.padded_shape[1], kHidden / 1024);
     CUDA_CHECK(cudaGetLastError());
 }
 
+template <int kParentRows, int kSplitRow, int kHidden>
 void launch_q5_split4_exact(const Tensor& x, const Weight& weight, Tensor& gate, Tensor& value,
                             cudaStream_t stream) {
     switch (x.ne[1]) {
     case 2:
-        launch_q5_split4<2>(x, weight, gate, value, stream);
+        launch_q5_split4<kParentRows, kSplitRow, kHidden, 2>(x, weight, gate, value, stream);
         return;
     case 3:
-        launch_q5_split4<3>(x, weight, gate, value, stream);
+        launch_q5_split4<kParentRows, kSplitRow, kHidden, 3>(x, weight, gate, value, stream);
         return;
     case 4:
-        launch_q5_split4<4>(x, weight, gate, value, stream);
+        launch_q5_split4<kParentRows, kSplitRow, kHidden, 4>(x, weight, gate, value, stream);
         return;
     case 5:
-        launch_q5_split4<5>(x, weight, gate, value, stream);
+        launch_q5_split4<kParentRows, kSplitRow, kHidden, 5>(x, weight, gate, value, stream);
         return;
     case 6:
-        launch_q5_split4<6>(x, weight, gate, value, stream);
+        launch_q5_split4<kParentRows, kSplitRow, kHidden, 6>(x, weight, gate, value, stream);
         return;
     case 7:
-        launch_q5_split4<7>(x, weight, gate, value, stream);
+        launch_q5_split4<kParentRows, kSplitRow, kHidden, 7>(x, weight, gate, value, stream);
         return;
     case 8:
-        launch_q5_split4<8>(x, weight, gate, value, stream);
+        launch_q5_split4<kParentRows, kSplitRow, kHidden, 8>(x, weight, gate, value, stream);
         return;
     case 9:
-        launch_q5_split4<9>(x, weight, gate, value, stream);
+        launch_q5_split4<kParentRows, kSplitRow, kHidden, 9>(x, weight, gate, value, stream);
         return;
     case 10:
-        launch_q5_split4<10>(x, weight, gate, value, stream);
+        launch_q5_split4<kParentRows, kSplitRow, kHidden, 10>(x, weight, gate, value, stream);
         return;
     case 11:
-        launch_q5_split4<11>(x, weight, gate, value, stream);
+        launch_q5_split4<kParentRows, kSplitRow, kHidden, 11>(x, weight, gate, value, stream);
         return;
     case 12:
-        launch_q5_split4<12>(x, weight, gate, value, stream);
+        launch_q5_split4<kParentRows, kSplitRow, kHidden, 12>(x, weight, gate, value, stream);
         return;
     case 13:
-        launch_q5_split4<13>(x, weight, gate, value, stream);
+        launch_q5_split4<kParentRows, kSplitRow, kHidden, 13>(x, weight, gate, value, stream);
         return;
     case 14:
-        launch_q5_split4<14>(x, weight, gate, value, stream);
+        launch_q5_split4<kParentRows, kSplitRow, kHidden, 14>(x, weight, gate, value, stream);
         return;
     case 15:
-        launch_q5_split4<15>(x, weight, gate, value, stream);
+        launch_q5_split4<kParentRows, kSplitRow, kHidden, 15>(x, weight, gate, value, stream);
         return;
     case 16:
-        launch_q5_split4<16>(x, weight, gate, value, stream);
+        launch_q5_split4<kParentRows, kSplitRow, kHidden, 16>(x, weight, gate, value, stream);
         return;
     default:
         throw std::invalid_argument("attention Q5 split4 requires T in [2,16]");
     }
 }
 
-template <int ColsPerTile>
+template <int kParentRows, int kSplitRow, int kHidden, int ColsPerTile>
 void launch_q5_simt(const Tensor& x, const Weight& weight, Tensor& gate, Tensor& value,
                     cudaStream_t stream) {
     constexpr int kRowsPerBlock = 8;
@@ -231,11 +234,11 @@ void launch_q5_simt(const Tensor& x, const Weight& weight, Tensor& gate, Tensor&
         static_cast<const std::uint8_t*>(weight.qhigh),
         static_cast<const std::uint8_t*>(weight.scales), static_cast<__nv_bfloat16*>(gate.data),
         static_cast<__nv_bfloat16*>(value.data), kParentRows, gate.ne[0], kHidden, cols,
-        weight.padded_shape[1], 5);
+        weight.padded_shape[1], kHidden / 1024);
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <int ActiveCols>
+template <int kParentRows, int kSplitRow, int kHidden, int ActiveCols>
 void launch_q5_attn_small_t_mma_active(const Tensor& x, const Weight& weight, Tensor& gate,
                                        Tensor& value, cudaStream_t stream) {
     constexpr int TileCols = ActiveCols <= 8 ? 8 : 16;
@@ -259,23 +262,25 @@ void launch_q5_attn_small_t_mma_active(const Tensor& x, const Weight& weight, Te
 
 using Q5AttnSmallTLauncher = void (*)(const Tensor&, const Weight&, Tensor&, Tensor&, cudaStream_t);
 
-template <std::size_t... Offsets>
+template <int kParentRows, int kSplitRow, int kHidden, std::size_t... Offsets>
 constexpr auto make_q5_attn_small_t_launchers(std::index_sequence<Offsets...>) {
     return std::array<Q5AttnSmallTLauncher, sizeof...(Offsets)>{
-        &launch_q5_attn_small_t_mma_active<2 + static_cast<int>(Offsets)>...};
+        &launch_q5_attn_small_t_mma_active<kParentRows, kSplitRow, kHidden,
+                                           2 + static_cast<int>(Offsets)>...};
 }
 
-constexpr auto kQ5AttnSmallTLaunchers =
-    make_q5_attn_small_t_launchers(std::make_index_sequence<15>{}); // 2..16
-
+template <int kParentRows, int kSplitRow, int kHidden>
 void launch_q5(const Tensor& x, const Weight& weight, Tensor& gate, Tensor& value,
                cudaStream_t stream) {
     if (x.ne[1] == 1) {
-        launch_q5_gemv(x, weight, gate, value, stream);
+        launch_q5_gemv<kParentRows, kSplitRow, kHidden>(x, weight, gate, value, stream);
         return;
     }
     if (x.ne[1] <= 16) {
-        kQ5AttnSmallTLaunchers[static_cast<std::size_t>(x.ne[1] - 2)](x, weight, gate, value, stream);
+        constexpr auto launchers =
+            make_q5_attn_small_t_launchers<kParentRows, kSplitRow, kHidden>(
+                std::make_index_sequence<15>{}); // 2..16
+        launchers[static_cast<std::size_t>(x.ne[1] - 2)](x, weight, gate, value, stream);
         return;
     }
     throw std::invalid_argument("attention Q5 split-output requires T in [1,16]");
@@ -315,6 +320,7 @@ StreamForkJoinContext& get_fork_join_context() {
 
 } // namespace
 
+template <int kParentRows, int kSplitRow, int kHidden>
 void q4_q5_attn_input_small_t_launch(const Tensor& x, const Weight& query_key_weight,
                                      const Weight& gate_value_weight, Tensor& q, Tensor& gate,
                                      Tensor& k, Tensor& v, cudaStream_t stream) {
@@ -326,12 +332,20 @@ void q4_q5_attn_input_small_t_launch(const Tensor& x, const Weight& query_key_we
 
     // 2. Co-schedule concurrent launches across 128 SMs:
     //    launch_q4 (448 blocks) + launch_q5 (448 blocks) = 896 blocks = 7.0 exact integer waves
-    launch_q4(x, query_key_weight, q, k, stream);
-    launch_q5(x, gate_value_weight, gate, v, ctx.side_stream);
+    launch_q4<kParentRows, kSplitRow, kHidden>(x, query_key_weight, q, k, stream);
+    launch_q5<kParentRows, kSplitRow, kHidden>(x, gate_value_weight, gate, v, ctx.side_stream);
 
     // 3. Join: record event on side_stream, have origin stream wait on it
     CUDA_CHECK(cudaEventRecord(ctx.join_event, ctx.side_stream));
     CUDA_CHECK(cudaStreamWaitEvent(stream, ctx.join_event, 0));
 }
+
+
+template void q4_q5_attn_input_small_t_launch<7168, 6144, 5120>(
+    const Tensor&, const Weight&, const Weight&, Tensor&, Tensor&, Tensor&, Tensor&,
+    cudaStream_t);
+template void q4_q5_attn_input_small_t_launch<5120, 4096, 4096>(
+    const Tensor&, const Weight&, const Weight&, Tensor&, Tensor&, Tensor&, Tensor&,
+    cudaStream_t);
 
 } // namespace ninfer::ops::detail

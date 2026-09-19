@@ -84,6 +84,21 @@ constexpr auto kMtpDownLaunchers =
 constexpr auto k35bMtpProjectionLaunchers = make_launchers<W835bMtpProjectionGeometry,
                                                            kW835bMtpProjectionFirstSmallT>(
     std::make_index_sequence<kW835bMtpProjectionLastSmallT - kW835bMtpProjectionFirstSmallT + 1>{});
+constexpr auto kMtp9BInputProjectionLaunchers =
+    make_launchers<W8Mtp9BInputProjectionGeometry, kW8Mtp9BFirstSmallT>(
+        std::make_index_sequence<kW8Mtp9BLastSmallT - kW8Mtp9BFirstSmallT + 1>{});
+constexpr auto kMtp9BAttentionProjectionLaunchers =
+    make_launchers<W8Mtp9BAttentionProjectionGeometry, kW8Mtp9BFirstSmallT>(
+        std::make_index_sequence<kW8Mtp9BLastSmallT - kW8Mtp9BFirstSmallT + 1>{});
+constexpr auto kMtp9BAttentionOutputLaunchers =
+    make_launchers<W8Mtp9BAttentionOutputGeometry, kW8Mtp9BFirstSmallT>(
+        std::make_index_sequence<kW8Mtp9BLastSmallT - kW8Mtp9BFirstSmallT + 1>{});
+constexpr auto kMtp9BGateUpLaunchers = make_launchers<W8Mtp9BGateUpProjectionGeometry,
+                                                      kW8Mtp9BFirstSmallT>(
+    std::make_index_sequence<kW8Mtp9BLastSmallT - kW8Mtp9BFirstSmallT + 1>{});
+constexpr auto kMtp9BDownLaunchers = make_splitk_launchers<W8Mtp9BDownProjectionGeometry,
+                                                           kW8Mtp9BFirstSmallT>(
+    std::make_index_sequence<kW8Mtp9BLastSmallT - kW8Mtp9BFirstSmallT + 1>{});
 
 } // namespace
 
@@ -135,6 +150,46 @@ void launch_w8_small_t(const Tensor& x, const Weight& weight, Tensor& out, cudaS
         x.ne[1] >= kW8MtpDownFirstSmallT && x.ne[1] <= kW8MtpDownLastSmallT) {
         const std::size_t index = static_cast<std::size_t>(x.ne[1] - kW8MtpDownFirstSmallT);
         kMtpDownLaunchers[index](x, weight, out, stream);
+        return;
+    }
+    if (weight.n == W8Mtp9BInputProjectionGeometry::kOutputRows &&
+        weight.k == W8Mtp9BInputProjectionGeometry::kInputRows &&
+        weight.padded_shape[1] == W8Mtp9BInputProjectionGeometry::kInputRows &&
+        x.ne[1] >= kW8Mtp9BFirstSmallT && x.ne[1] <= kW8Mtp9BLastSmallT) {
+        const std::size_t index = static_cast<std::size_t>(x.ne[1] - kW8Mtp9BFirstSmallT);
+        kMtp9BInputProjectionLaunchers[index](x, weight, out, stream);
+        return;
+    }
+    if (weight.n == W8Mtp9BAttentionProjectionGeometry::kOutputRows &&
+        weight.k == W8Mtp9BAttentionProjectionGeometry::kInputRows &&
+        weight.padded_shape[1] == W8Mtp9BAttentionProjectionGeometry::kInputRows &&
+        x.ne[1] >= kW8Mtp9BFirstSmallT && x.ne[1] <= kW8Mtp9BLastSmallT) {
+        const std::size_t index = static_cast<std::size_t>(x.ne[1] - kW8Mtp9BFirstSmallT);
+        kMtp9BAttentionProjectionLaunchers[index](x, weight, out, stream);
+        return;
+    }
+    if (weight.n == W8Mtp9BAttentionOutputGeometry::kOutputRows &&
+        weight.k == W8Mtp9BAttentionOutputGeometry::kInputRows &&
+        weight.padded_shape[1] == W8Mtp9BAttentionOutputGeometry::kInputRows &&
+        x.ne[1] >= kW8Mtp9BFirstSmallT && x.ne[1] <= kW8Mtp9BLastSmallT) {
+        const std::size_t index = static_cast<std::size_t>(x.ne[1] - kW8Mtp9BFirstSmallT);
+        kMtp9BAttentionOutputLaunchers[index](x, weight, out, stream);
+        return;
+    }
+    if (weight.n == W8Mtp9BGateUpProjectionGeometry::kOutputRows &&
+        weight.k == W8Mtp9BGateUpProjectionGeometry::kInputRows &&
+        weight.padded_shape[1] == W8Mtp9BGateUpProjectionGeometry::kInputRows &&
+        x.ne[1] >= kW8Mtp9BFirstSmallT && x.ne[1] <= kW8Mtp9BLastSmallT) {
+        const std::size_t index = static_cast<std::size_t>(x.ne[1] - kW8Mtp9BFirstSmallT);
+        kMtp9BGateUpLaunchers[index](x, weight, out, stream);
+        return;
+    }
+    if (weight.n == W8Mtp9BDownProjectionGeometry::kOutputRows &&
+        weight.k == W8Mtp9BDownProjectionGeometry::kInputRows &&
+        weight.padded_shape[1] == W8Mtp9BDownProjectionGeometry::kInputRows &&
+        x.ne[1] >= kW8Mtp9BFirstSmallT && x.ne[1] <= kW8Mtp9BLastSmallT) {
+        const std::size_t index = static_cast<std::size_t>(x.ne[1] - kW8Mtp9BFirstSmallT);
+        kMtp9BDownLaunchers[index](x, weight, out, stream);
         return;
     }
     if (weight.n == W835bMtpProjectionGeometry::kOutputRows &&

@@ -877,8 +877,8 @@ void ProgramImplCore::resolve_pending_batch(std::span<const std::uint32_t> lanes
         throw std::logic_error("speculative pending batch has no ReplaySSM records");
     }
 
-    std::array<ops::GdnReplayFoldRow, kMaximumConcurrency> fold_rows{};
-    std::array<std::int32_t, kMaximumConcurrency> hidden_selectors{};
+    std::array<ops::GdnReplayFoldRow, kMaximumLanes> fold_rows{};
+    std::array<std::int32_t, kMaximumLanes> hidden_selectors{};
     bool needs_hidden_correction = false;
     for (std::size_t row = 0; row < lanes.size(); ++row) {
         const std::uint32_t lane = lanes[row];
@@ -952,9 +952,9 @@ void ProgramImplCore::resolve_pending_batch(std::span<const std::uint32_t> lanes
         }
 
         if (speculative_backend == SpeculativeBackend::DFlash) {
-            std::array<std::uint32_t, kMaximumConcurrency> append_lanes{};
-            std::array<std::uint32_t, kMaximumConcurrency> append_starts{};
-            std::array<std::uint32_t, kMaximumConcurrency> append_counts{};
+            std::array<std::uint32_t, kMaximumLanes> append_lanes{};
+            std::array<std::uint32_t, kMaximumLanes> append_starts{};
+            std::array<std::uint32_t, kMaximumLanes> append_counts{};
             std::size_t append_size = 0;
             for (std::size_t row = 0; row < lanes.size(); ++row) {
                 if (!cancelled[row] && terminal[row]) {

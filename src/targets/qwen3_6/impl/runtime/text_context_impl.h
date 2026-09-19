@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "targets/qwen3_6/impl/runtime/instance.h"
 #include "targets/qwen3_6/impl/runtime/text_context.h"
 #include "targets/qwen3_6/impl/runtime/workspace_recipe.h"
@@ -643,8 +644,8 @@ void TextContext::ordinary_decode_batch(const Tensor& ids, const Tensor& cache_p
                                         ops::GqaExecutionEnvelope envelope, Tensor& hidden,
                                         Tensor& logits) {
     const std::int32_t batch = ids.ne[0];
-    if (batch <= 0 || batch > static_cast<std::int32_t>(kMaximumConcurrency)) {
-        throw std::invalid_argument("ordinary decode batch size must be in [1,8]");
+    if (batch <= 0 || batch > static_cast<std::int32_t>(kMaximumLanes)) {
+        throw std::invalid_argument("ordinary decode batch size must not exceed kMaximumLanes");
     }
     require_tensor_shape(ids, DType::I32, {batch}, "ordinary decode ids");
     require_tensor_shape(cache_positions, DType::I32, {batch}, "ordinary decode cache positions");
@@ -686,7 +687,7 @@ void TextContext::target_verify_batch_impl(const Tensor& ids, const Tensor& cach
     const std::int32_t width = ids.ne[0];
     const std::int32_t batch = ids.ne[1];
     if (width <= 0 || width > static_cast<std::int32_t>(kDFlashDecodeMaximumWidth) || batch <= 0 ||
-        batch > static_cast<std::int32_t>(kMaximumConcurrency)) {
+        batch > static_cast<std::int32_t>(kMaximumLanes)) {
         throw std::invalid_argument("target verify batch shape is outside the supported domain");
     }
     const std::int32_t columns = width * batch;
@@ -764,7 +765,7 @@ void TextContext::mtp_forward_decode_batch(const Tensor& ids, const Tensor& hidd
     const std::int32_t width = ids.ne[0];
     const std::int32_t batch = ids.ne[1];
     if (width <= 0 || width > static_cast<std::int32_t>(kMaximumMtpDraftTokens + 1) || batch <= 0 ||
-        batch > static_cast<std::int32_t>(kMaximumConcurrency)) {
+        batch > static_cast<std::int32_t>(kMaximumLanes)) {
         throw std::invalid_argument("MTP decode batch shape is outside the supported domain");
     }
     require_tensor_shape(ids, DType::I32, {width, batch}, "MTP decode batch ids");
@@ -851,6 +852,17 @@ void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph) {
                            s);
     }
     ops::sigmoid_mul(gate, a, s);
+    {
+        static int probe_a = 0;
+        if (probe_a < 8) {
+            std::vector<char> host(a.numel() * 2);
+            cudaMemcpy(host.data(), a.data, host.size(), cudaMemcpyDeviceToHost);
+            FILE* fp = fopen(("/tmp/sprout/probe_attn_" + std::to_string(probe_a) + ".bin").c_str(), "wb");
+            fwrite(host.data(), 1, host.size(), fp);
+            fclose(fp);
+        }
+        probe_a++;
+    }
 
     Variant::attention_output_projection(a.view({kCfg.q_size, T}), *w.o_proj, x, ph, work_, s);
 }
@@ -863,6 +875,17 @@ void TextContext::gdn_mix(const GdnLayerW& w, Tensor& x, int gidx, Phase ph) {
     Tensor h           = control.hidden;
     Tensor g           = control.g;
     Tensor beta        = control.beta;
+    {
+        static int probe_gin = 0;
+        if (probe_gin < 4) {
+            std::vector<char> host(x.numel() * 2);
+            cudaMemcpy(host.data(), x.data, host.size(), cudaMemcpyDeviceToHost);
+            FILE* fp = fopen(("/tmp/sprout/probe_gin_" + std::to_string(probe_gin) + ".bin").c_str(), "wb");
+            fwrite(host.data(), 1, host.size(), fp);
+            fclose(fp);
+        }
+        probe_gin++;
+    }
     Variant::gdn_norm_control_projection(x, *w.input_norm, kCfg.rms_eps, *w.projection, h, g, beta,
                                          work_, s);
 
@@ -915,6 +938,20 @@ void TextContext::gdn_mix(const GdnLayerW& w, Tensor& x, int gidx, Phase ph) {
         ops::extract_bf16_columns(qkv_c, 2 * kCfg.key_dim, vc, s);
     }
 
+    {
+        static int probe_qkv = 0;
+        if (probe_qkv < 1) {
+            probe_qkv++;
+            std::vector<char> hq(qc.numel() * 2), hk(kc.numel() * 2), hv(vc.numel() * 2);
+            cudaMemcpy(hq.data(), qc.data, hq.size(), cudaMemcpyDeviceToHost);
+            cudaMemcpy(hk.data(), kc.data, hk.size(), cudaMemcpyDeviceToHost);
+            cudaMemcpy(hv.data(), vc.data, hv.size(), cudaMemcpyDeviceToHost);
+            FILE* fp;
+            fp = fopen("/tmp/sprout/probe_qc.bin", "wb"); fwrite(hq.data(), 1, hq.size(), fp); fclose(fp);
+            fp = fopen("/tmp/sprout/probe_kc.bin", "wb"); fwrite(hk.data(), 1, hk.size(), fp); fclose(fp);
+            fp = fopen("/tmp/sprout/probe_vc.bin", "wb"); fwrite(hv.data(), 1, hv.size(), fp); fclose(fp);
+        }
+    }
     Tensor q_recurrent = qc.view({kCfg.gdn_k_dim, kCfg.gdn_k_heads, T});
     Tensor k_recurrent = kc.view({kCfg.gdn_k_dim, kCfg.gdn_k_heads, T});
 
@@ -1006,6 +1043,17 @@ void TextContext::run_layers(Tensor& x, Phase ph, Tap& tap) {
                     static_cast<std::uint64_t>(layer));
                 auto mixer_scope = work_.scope();
                 gdn_mix(gdn, x, gidx, ph);
+                {
+                    static int probe_i = 0;
+                    if (probe_i < 40) {
+                        std::vector<char> host(x.numel() * 2);
+                        cudaMemcpy(host.data(), x.data, host.size(), cudaMemcpyDeviceToHost);
+                        FILE* fp = fopen(("/tmp/sprout/probe_gdn_" + std::to_string(probe_i) + ".bin").c_str(), "wb");
+                        fwrite(host.data(), 1, host.size(), fp);
+                        fclose(fp);
+                    }
+                    probe_i++;
+                }
             }
             {
                 nvtx::ScopedRange post_mixer_range(
@@ -1171,10 +1219,33 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                             : work_.alloc(DType::BF16, {kCfg.hidden, len});
             ops::rmsnorm(x, *final_norm_, kCfg.rms_eps, true, xf, s);
 
+
             if (is_last) {
                 Tensor last_xf = xf.slice(1, len - 1, 1);
+                {
+                    static bool dumped_lh = false;
+                    if (!dumped_lh && last_xf.ne[0] == 4096) {
+                        dumped_lh = true;
+                        FILE* fp = fopen("/tmp/sprout/last_xf.bin", "wb");
+                        std::vector<char> host(last_xf.numel() * 2);
+                        cudaMemcpy(host.data(), last_xf.data, host.size(), cudaMemcpyDeviceToHost);
+                        fwrite(host.data(), 1, host.size(), fp);
+                        fclose(fp);
+                    }
+                }
                 Tensor logits  = matrix_window(io_.logits, 1);
                 ops::linear(last_xf, *lm_head_, logits, s);
+                {
+                    static bool dumped_logits = false;
+                    if (!dumped_logits) {
+                        dumped_logits = true;
+                        FILE* fp = fopen("/tmp/sprout/logits.bin", "wb");
+                        std::vector<char> host(io_.logits.numel() * 2);
+                        cudaMemcpy(host.data(), io_.logits.data, host.size(), cudaMemcpyDeviceToHost);
+                        fwrite(host.data(), 1, host.size(), fp);
+                        fclose(fp);
+                    }
+                }
                 // Set io_.pos to the bonus token's absolute position (base + T) before picking so
                 // the sampler RNG is keyed by it (prefill purpose keeps it distinct from the first
                 // decode step, which reuses the same io_.pos).

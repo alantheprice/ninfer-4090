@@ -14,6 +14,17 @@ W8Launch select_w8_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
             return launch_w8_mma_r64_c128;
         }
         break;
+    case 8192:
+        // Qwen3.5-9B MTP: input projection 4096x8192, gate_up 4096x24576.
+        if (n == 4096 || n == 24576) {
+            if (t <= 48) { return launch_w8_small_t; }
+            return launch_w8_mma_r64_c128;
+        }
+        if (n == 12288) {
+            if (t <= 48) { return launch_w8_small_t; }
+            return launch_w8_mma_r64_c128;
+        }
+        break;
     case 5120:
         switch (n) {
         case 1024:
@@ -57,6 +68,21 @@ W8Launch select_w8_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
             if (t <= 48) { return launch_w8_small_t; }
             if (t <= 56) { return launch_w8_simt_r8_c4; }
             if (t <= 895) { return launch_w8_mma_r32_c128; }
+            return launch_w8_mma_r64_c128;
+        }
+        // Qwen3.5-9B: attention packed 10240x4096, output 4096x4096, gate_up 24576x4096.
+        if (n == 4096 || n == 10240 || n == 24576) {
+            if (t <= 48) { return launch_w8_small_t; }
+            return launch_w8_mma_r64_c128;
+        }
+        if (n == 12288) {
+            if (t <= 48) { return launch_w8_small_t; }
+            return launch_w8_mma_r64_c128;
+        }
+        break;
+    case 12288:
+        if (n == 4096) {
+            if (t <= 48) { return launch_w8_small_t; }
             return launch_w8_mma_r64_c128;
         }
         break;

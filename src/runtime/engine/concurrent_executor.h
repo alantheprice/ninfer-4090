@@ -48,7 +48,7 @@ public:
                            options.max_pending_requests),
           pending_timeout_(std::chrono::milliseconds(options.pending_timeout_ms)),
           admission_capacity_(instance.program->admission_capacity()) {
-        if (max_concurrency_ == 0 || max_concurrency_ > kMaximumConcurrency ||
+        if (max_concurrency_ == 0 || max_concurrency_ > kMaximumLanes ||
             options.max_pending_requests == 0 || pending_timeout_.count() <= 0) {
             throw std::invalid_argument("concurrent executor bounds are invalid");
         }
@@ -322,8 +322,8 @@ private:
         bool decode_ready = false;
 
         std::optional<BasePlan> base_plan;
-        std::array<std::optional<Plan>, kMaximumConcurrency> lane_plans{};
-        std::array<std::uint64_t, kMaximumConcurrency> lane_plan_versions{};
+        std::array<std::optional<Plan>, kMaximumLanes> lane_plans{};
+        std::array<std::uint64_t, kMaximumLanes> lane_plan_versions{};
         AdmissionResources admission_resources;
         std::uint64_t remaining_service_work = 0;
         std::uint64_t backfill_epoch         = 0;
@@ -340,8 +340,8 @@ private:
     };
 
     struct RoundMembership {
-        std::array<std::uint32_t, kMaximumConcurrency> lanes{};
-        std::array<RoundBudget, kMaximumConcurrency> budgets{};
+        std::array<std::uint32_t, kMaximumLanes> lanes{};
+        std::array<RoundBudget, kMaximumLanes> budgets{};
         std::size_t size = 0;
 
         [[nodiscard]] bool empty() const noexcept { return size == 0; }
@@ -356,7 +356,7 @@ private:
     };
 
     struct ActiveAdmissionSet {
-        std::array<ActiveAdmissionSnapshot, kMaximumConcurrency> requests{};
+        std::array<ActiveAdmissionSnapshot, kMaximumLanes> requests{};
         std::size_t size = 0;
 
         [[nodiscard]] std::span<const ActiveAdmissionSnapshot> span() const noexcept {
@@ -547,8 +547,8 @@ private:
         request->remaining_service_work -= work;
     }
 
-    [[nodiscard]] std::array<bool, kMaximumConcurrency> snapshot_cancellations() const noexcept {
-        std::array<bool, kMaximumConcurrency> cancelled{};
+    [[nodiscard]] std::array<bool, kMaximumLanes> snapshot_cancellations() const noexcept {
+        std::array<bool, kMaximumLanes> cancelled{};
         for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
             if (slots_[lane] != nullptr) {
                 cancelled[lane] = slots_[lane]->cancelled.load(std::memory_order_acquire);
@@ -558,7 +558,7 @@ private:
     }
 
     void
-    cancel_active_requests(const std::array<bool, kMaximumConcurrency>& cancelled_at_boundary) {
+    cancel_active_requests(const std::array<bool, kMaximumLanes>& cancelled_at_boundary) {
         bool changed = false;
         for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
             const auto& request = slots_[lane];
@@ -1054,7 +1054,7 @@ private:
         const BatchedGeneratedRound round =
             instance_.program->decode_batch(lanes, membership.budget_span());
 
-        std::array<std::uint8_t, kMaximumConcurrency> cancelled{};
+        std::array<std::uint8_t, kMaximumLanes> cancelled{};
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             cancelled[row] =
                 slots_[lanes[row]]->cancelled.load(std::memory_order_acquire) ? 1U : 0U;
@@ -1066,9 +1066,9 @@ private:
             throw std::logic_error("decode batch returned an invalid ragged layout");
         }
 
-        std::array<std::uint32_t, kMaximumConcurrency> accepted{};
-        std::array<std::uint8_t, kMaximumConcurrency> terminal{};
-        std::array<FinishReason, kMaximumConcurrency> finish_reasons{};
+        std::array<std::uint32_t, kMaximumLanes> accepted{};
+        std::array<std::uint8_t, kMaximumLanes> terminal{};
+        std::array<FinishReason, kMaximumLanes> finish_reasons{};
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             const std::uint32_t lane = lanes[row];
             const auto& request      = slots_[lane];
@@ -1231,9 +1231,9 @@ private:
     std::deque<std::shared_ptr<Request>> pending_;
     std::size_t outstanding_       = 0;
     std::uint64_t next_request_id_ = 1;
-    std::array<std::shared_ptr<Request>, kMaximumConcurrency> slots_{};
+    std::array<std::shared_ptr<Request>, kMaximumLanes> slots_{};
     std::optional<std::uint32_t> prefill_lane_;
-    std::array<std::uint64_t, kMaximumConcurrency> lane_plan_versions_{};
+    std::array<std::uint64_t, kMaximumLanes> lane_plan_versions_{};
     std::optional<AdmissionProtection> protection_;
     std::uint64_t next_protection_epoch_ = 1;
     RuntimeStats cumulative_stats_;

@@ -59,13 +59,15 @@ void launch_pair(bool full, const Tensor& x, RowSplitGroupedMmaJob first,
 template <class Schedule>
 void launch_slice(const Tensor& x, const Weight& query_key_weight, const Weight& gate_value_weight,
                   Tensor& q, Tensor& gate, Tensor& k, Tensor& v, cudaStream_t stream) {
+    // Row split: q then kv. 27B splits at 6144 of 7168; 9B at 4096 of 5120.
+    const std::int32_t split = (x.ne[0] == 4096) ? 4096 : 6144;
     const bool full = (x.ne[1] % Schedule::BN) == 0;
     launch_pair<Schedule, RowSplitGroupedMmaCodec::Q4>(
-        full, x, make_job(query_key_weight, 0, 6144, q), make_job(query_key_weight, 6144, 1024, k),
-        stream);
+        full, x, make_job(query_key_weight, 0, split, q),
+        make_job(query_key_weight, split, 1024, k), stream);
     launch_pair<Schedule, RowSplitGroupedMmaCodec::Q5>(
-        full, x, make_job(gate_value_weight, 0, 6144, gate),
-        make_job(gate_value_weight, 6144, 1024, v), stream);
+        full, x, make_job(gate_value_weight, 0, split, gate),
+        make_job(gate_value_weight, split, 1024, v), stream);
 }
 
 template <class Schedule>

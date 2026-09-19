@@ -18,13 +18,13 @@ constexpr std::int32_t kHeadDim                      = 256;
 constexpr std::int32_t kQuantGroup                   = 64;
 constexpr std::int32_t kSmallTChunkTokens            = 8;
 constexpr std::int32_t kMaximumVerifyTokens          = 16;
-constexpr std::int32_t kMaximumBatchSize             = 8;
+constexpr std::int32_t kMaximumBatchSize             = 64; // raised from 8 for multi-lane serving
 constexpr std::uint32_t kTwoChunkPromptVisibleKeys   = 512;
 constexpr std::uint32_t kThreeChunkPromptVisibleKeys = 1024;
 
 std::int32_t kv_heads_for_q_heads(std::int32_t q_heads, const char* op) {
-    if (q_heads == 24) { return 4; }
-    if (q_heads == 16) { return 2; }
+    if (q_heads == 24) { return 4; }  // Qwen3.8-27B: 24 Q / 4 KV
+    if (q_heads == 16) { return 4; }  // Qwen3.5-9B: 16 Q / 4 KV
     throw std::invalid_argument(std::string(op) + ": unsupported Q/KV head geometry");
 }
 

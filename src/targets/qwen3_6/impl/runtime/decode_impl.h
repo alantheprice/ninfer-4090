@@ -12,7 +12,7 @@ namespace {
 auto ordinary_batch_body(OrdinaryBatchContext& state, std::int32_t batch_size,
                          ops::GqaExecutionEnvelope envelope) {
     return [&state, batch_size, envelope] {
-        if (batch_size <= 0 || batch_size > static_cast<std::int32_t>(kMaximumConcurrency)) {
+        if (batch_size <= 0 || batch_size > static_cast<std::int32_t>(kMaximumLanes)) {
             throw std::logic_error("ordinary decode batch state is incomplete");
         }
 

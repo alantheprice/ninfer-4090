@@ -29,62 +29,62 @@ struct RoundStateSpec {
 // Stable pinned/device transfer format for ordinary decode. The full fixed-size object is copied
 // once per round; only its exact-B prefixes are consumed by the model schedule.
 struct OrdinaryDecodeIngress {
-    std::array<TokenId, kMaximumConcurrency> tokens{};
-    std::array<std::int32_t, kMaximumConcurrency> cache_positions{};
-    std::array<std::int32_t, kMaximumConcurrency> rope_positions{};
-    std::array<std::int32_t, kMaximumConcurrency> text_kv_table_rows{};
-    std::array<std::int32_t, kMaximumConcurrency> lanes{};
-    std::array<ops::SamplingConfig, kMaximumConcurrency> sampling{};
+    std::array<TokenId, kMaximumLanes> tokens{};
+    std::array<std::int32_t, kMaximumLanes> cache_positions{};
+    std::array<std::int32_t, kMaximumLanes> rope_positions{};
+    std::array<std::int32_t, kMaximumLanes> text_kv_table_rows{};
+    std::array<std::int32_t, kMaximumLanes> lanes{};
+    std::array<ops::SamplingConfig, kMaximumLanes> sampling{};
 };
 
 struct OrdinaryDecodeEgress {
-    std::array<TokenId, kMaximumConcurrency> sampled_tokens{};
+    std::array<TokenId, kMaximumLanes> sampled_tokens{};
 };
 
 // Stable pinned/device transfer formats for concurrent MTP decode. The arrays use the maximum
 // product domain; RoundState binds only the configured [K,C] and [K+1,C] prefixes.
 struct MtpDecodeIngress {
-    std::array<TokenId, kMaximumConcurrency> anchors{};
-    std::array<std::int32_t, kMaximumConcurrency> base_frontiers{};
-    std::array<std::int32_t, kMaximumConcurrency> remaining_budgets{};
-    std::array<std::int32_t, kMaximumConcurrency> current_extents{};
-    std::array<std::int32_t, kMaximumConcurrency> target_valid_columns{};
-    std::array<TokenId, kMaximumConcurrency * kMtpDecodeMaximumDrafts> current_drafts{};
-    std::array<std::int32_t, kMaximumConcurrency * kMtpDecodeMaximumWidth> target_rope_positions{};
-    std::array<std::int32_t, kMaximumConcurrency> text_kv_table_rows{};
-    std::array<std::int32_t, kMaximumConcurrency> mtp_kv_table_rows{};
-    std::array<std::int32_t, kMaximumConcurrency> lanes{};
-    std::array<std::int32_t, kMaximumConcurrency> rope_deltas{};
-    std::array<ops::SamplingConfig, kMaximumConcurrency> sampling{};
+    std::array<TokenId, kMaximumLanes> anchors{};
+    std::array<std::int32_t, kMaximumLanes> base_frontiers{};
+    std::array<std::int32_t, kMaximumLanes> remaining_budgets{};
+    std::array<std::int32_t, kMaximumLanes> current_extents{};
+    std::array<std::int32_t, kMaximumLanes> target_valid_columns{};
+    std::array<TokenId, kMaximumLanes * kMtpDecodeMaximumDrafts> current_drafts{};
+    std::array<std::int32_t, kMaximumLanes * kMtpDecodeMaximumWidth> target_rope_positions{};
+    std::array<std::int32_t, kMaximumLanes> text_kv_table_rows{};
+    std::array<std::int32_t, kMaximumLanes> mtp_kv_table_rows{};
+    std::array<std::int32_t, kMaximumLanes> lanes{};
+    std::array<std::int32_t, kMaximumLanes> rope_deltas{};
+    std::array<ops::SamplingConfig, kMaximumLanes> sampling{};
 };
 
 struct MtpDecodeEgress {
-    std::array<TokenId, kMaximumConcurrency * kMtpDecodeMaximumWidth> licensed_tokens{};
-    std::array<std::int32_t, kMaximumConcurrency> licensed_counts{};
-    std::array<std::int32_t, kMaximumConcurrency> accepted_drafts{};
+    std::array<TokenId, kMaximumLanes * kMtpDecodeMaximumWidth> licensed_tokens{};
+    std::array<std::int32_t, kMaximumLanes> licensed_counts{};
+    std::array<std::int32_t, kMaximumLanes> accepted_drafts{};
     // Step-major: all B rows for proposal step 0, followed by all B rows for step 1, etc.
-    std::array<TokenId, kMaximumConcurrency * kMtpDecodeMaximumDrafts> next_drafts{};
-    std::array<std::int32_t, kMaximumConcurrency> next_extents{};
+    std::array<TokenId, kMaximumLanes * kMtpDecodeMaximumDrafts> next_drafts{};
+    std::array<std::int32_t, kMaximumLanes> next_extents{};
 };
 
 // Stable pinned/device transfer formats for one exact-B DFlash transaction. The proposal is
 // produced and verified in the same round, so no draft state crosses the round boundary.
 struct DFlashDecodeIngress {
-    std::array<TokenId, kMaximumConcurrency> anchors{};
-    std::array<std::int32_t, kMaximumConcurrency> execution_frontiers{};
-    std::array<std::int32_t, kMaximumConcurrency> context_frontiers{};
-    std::array<std::int32_t, kMaximumConcurrency> proposal_extents{};
-    std::array<std::int32_t, kMaximumConcurrency> target_valid_columns{};
-    std::array<std::int32_t, kMaximumConcurrency> text_kv_table_rows{};
-    std::array<std::int32_t, kMaximumConcurrency> dflash_kv_table_rows{};
-    std::array<std::int32_t, kMaximumConcurrency> lanes{};
-    std::array<ops::SamplingConfig, kMaximumConcurrency> sampling{};
+    std::array<TokenId, kMaximumLanes> anchors{};
+    std::array<std::int32_t, kMaximumLanes> execution_frontiers{};
+    std::array<std::int32_t, kMaximumLanes> context_frontiers{};
+    std::array<std::int32_t, kMaximumLanes> proposal_extents{};
+    std::array<std::int32_t, kMaximumLanes> target_valid_columns{};
+    std::array<std::int32_t, kMaximumLanes> text_kv_table_rows{};
+    std::array<std::int32_t, kMaximumLanes> dflash_kv_table_rows{};
+    std::array<std::int32_t, kMaximumLanes> lanes{};
+    std::array<ops::SamplingConfig, kMaximumLanes> sampling{};
 };
 
 struct DFlashDecodeEgress {
-    std::array<TokenId, kMaximumConcurrency * kDFlashDecodeMaximumWidth> licensed_tokens{};
-    std::array<std::int32_t, kMaximumConcurrency> licensed_counts{};
-    std::array<std::int32_t, kMaximumConcurrency> accepted_drafts{};
+    std::array<TokenId, kMaximumLanes * kDFlashDecodeMaximumWidth> licensed_tokens{};
+    std::array<std::int32_t, kMaximumLanes> licensed_counts{};
+    std::array<std::int32_t, kMaximumLanes> accepted_drafts{};
 };
 
 struct OrdinaryDecodeStateLayout {

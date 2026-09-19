@@ -14,7 +14,7 @@ namespace {
 
 static_assert(sizeof(GdnReplayFoldKernelRow) == 8);
 static_assert(alignof(GdnReplayFoldKernelRow) == 8);
-static_assert(sizeof(GdnReplayFoldKernelRows) == 64);
+static_assert(sizeof(GdnReplayFoldKernelRows) == 64 * 8);
 static_assert(alignof(GdnReplayFoldKernelRows) == 16);
 static_assert(std::is_trivially_copyable_v<GdnReplayFoldKernelRows>);
 
@@ -242,6 +242,13 @@ void launch_replay_fold(const GdnReplayRecords& records, LinearAttentionStateAll
         records.spec.value_heads == FoldGeometry30x32::kValueHeads &&
         records.spec.conv_channels == FoldGeometry30x32::kConvChannels) {
         launch_replay_fold_fixed<FoldGeometry30x32>(records, states, rows, active_rows, stream);
+        return;
+    }
+    if (records.spec.layers == FoldGeometry24x32::kLayers &&
+        records.spec.qk_heads == FoldGeometry24x32::kQkHeads &&
+        records.spec.value_heads == FoldGeometry24x32::kValueHeads &&
+        records.spec.conv_channels == FoldGeometry24x32::kConvChannels) {
+        launch_replay_fold_fixed<FoldGeometry24x32>(records, states, rows, active_rows, stream);
         return;
     }
     throw std::invalid_argument("GDN replay fold launcher received an unregistered geometry");

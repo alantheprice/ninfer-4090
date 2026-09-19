@@ -356,8 +356,8 @@ public:
     Tensor tail_hidden_store;
     Tensor turn_checkpoint_hidden_store;
 
-    std::array<SequenceState, kMaximumConcurrency> sequences;
-    std::array<RequestControl, kMaximumConcurrency> requests;
+    std::array<SequenceState, kMaximumLanes> sequences;
+    std::array<RequestControl, kMaximumLanes> requests;
 
     DecodeGraphFamily ordinary_graphs;
     DecodeGraphFamily mtp_graphs;

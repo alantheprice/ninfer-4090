@@ -35,8 +35,14 @@ constexpr bool catalog_is_closed() {
 static_assert(catalog_is_closed(), "W8 GDN input routes must be exact and closed");
 
 bool supported_shape(const W8GdnInputProblem& problem) noexcept {
-    return problem.input_rows == 2048 && problem.qkv_rows == 8192 && problem.z_rows == 4096 &&
-           problem.parent_rows == 12288 && problem.padded_k == 2048;
+    const bool is35 = problem.input_rows == 2048 && problem.qkv_rows == 8192 &&
+                      problem.z_rows == 4096 && problem.parent_rows == 12288 &&
+                      problem.padded_k == 2048;
+    // Qwen3.8-27B W8/MTP-side GDN projections.
+    const bool is279b = problem.input_rows == 4096 && problem.qkv_rows == 4096 &&
+                        problem.z_rows == 4096 && problem.parent_rows == 8192 &&
+                        problem.padded_k == 4096;
+    return is35 || is279b;
 }
 
 } // namespace
@@ -81,7 +87,7 @@ W8GdnInputPlan w8_gdn_input_resolve_plan(const W8GdnInputProblem& problem) {
 
 W8GdnInputConvPlan w8_gdn_input_conv_resolve_plan(const W8GdnInputProblem& problem,
                                                   std::int32_t batch_size) {
-    if (!w8_gdn_input_admits(problem) || batch_size <= 0 || batch_size > 8) {
+    if (!w8_gdn_input_admits(problem) || batch_size <= 0 || batch_size > 64) {
         throw std::invalid_argument(
             "W8 GDN input conv: exact problem or column count is not admitted");
     }

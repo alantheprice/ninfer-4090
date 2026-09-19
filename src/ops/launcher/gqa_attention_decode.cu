@@ -165,8 +165,15 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
             launch.template operator()<8, 1, 32, true>();
         }
     } else if constexpr (TokenTile == 6) {
-        // Three Q row tiles for the 27B group of six (RowTiles = 3).
-        if (implementation_window > 128 && implementation_window <= 160) {
+        if constexpr (Geometry::GroupSize == 4) {
+            // 9B group of four: RowTiles = 2 -> Wc = 8.
+            if (implementation_window <= 8198) {
+                launch.template operator()<8, 1, 32, false>();
+            } else {
+                launch.template operator()<8, 1, 64, true>();
+            }
+        } else if (implementation_window > 128 && implementation_window <= 160) {
+            // Three Q row tiles for the 27B group of six (RowTiles = 3).
             launch.template operator()<6, 1, 32, false>();
         } else if (implementation_window <= 2054) {
             launch.template operator()<6, 1, 32, false>();
@@ -185,6 +192,9 @@ void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, 
             } else {
                 launch.template operator()<8, 2, 32, false>();
             }
+        } else if constexpr (Geometry::GroupSize == 4) {
+            // 9B group of four: RowTiles = 2 -> Wc = 8.
+            launch.template operator()<8, 2, 32, false>();
         } else {
             // Three Q row tiles for the 35B group of eight (RowTiles = 3).
             if (implementation_window > 128 && implementation_window <= 512) {
@@ -245,6 +255,9 @@ std::int32_t gqa_attention_split_capacity(std::int32_t q_heads, std::int32_t tok
     }
     if (q_heads == Gqa35Geometry::QHeads) {
         return gqa_small_t_launch_capacity<Gqa35Geometry>(envelope, tokens, cache_dtype);
+    }
+    if (q_heads == Gqa9BGeometry::QHeads) {
+        return gqa_small_t_launch_capacity<Gqa9BGeometry>(envelope, tokens, cache_dtype);
     }
     throw std::invalid_argument("gqa_attention split capacity: unsupported Q-head count");
 }
@@ -425,6 +438,12 @@ void gqa_attention_small_t_launch(const Tensor& q, const Tensor& k, const Tensor
                                                         out, stream);
         return;
     }
+    if (q.ne[1] == Gqa9BGeometry::QHeads) {
+        gqa_attention_small_t_launch_for<Gqa9BGeometry>(q, input, pos, scale, cache, invocation,
+                                                        envelope, partial_acc, partial_m, partial_l,
+                                                        out, stream);
+        return;
+    }
     gqa_attention_small_t_launch_for<Gqa35Geometry>(q, input, pos, scale, cache, invocation,
                                                     envelope, partial_acc, partial_m, partial_l,
                                                     out, stream);
@@ -447,6 +466,12 @@ void gqa_attention_cached_small_t_launch(const Tensor& q, const Tensor& pos, flo
     const PagedKVBatchLayerView batch_cache = single_row_batch_view(cache);
     if (q.ne[1] == Gqa27Geometry::QHeads) {
         gqa_attention_small_t_launch_for<Gqa27Geometry>(q, input, pos, scale, batch_cache,
+                                                        invocation, envelope, partial_acc,
+                                                        partial_m, partial_l, out, stream);
+        return;
+    }
+    if (q.ne[1] == Gqa9BGeometry::QHeads) {
+        gqa_attention_small_t_launch_for<Gqa9BGeometry>(q, input, pos, scale, batch_cache,
                                                         invocation, envelope, partial_acc,
                                                         partial_m, partial_l, out, stream);
         return;

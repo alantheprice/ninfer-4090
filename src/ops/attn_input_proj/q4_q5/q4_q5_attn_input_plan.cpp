@@ -40,8 +40,11 @@ constexpr bool catalog_is_closed() noexcept {
 static_assert(catalog_is_closed(), "attention input routes must be exact and closed");
 
 bool supported_shape(const Q4Q5AttnInputProblem& problem) noexcept {
-    return problem.input_rows == 5120 && problem.query_rows == 6144 && problem.kv_rows == 1024 &&
-           problem.padded_k == 5120;
+    // Qwen3.8-27B: hidden 5120, q 6144. Qwen3.5-9B: hidden 4096, q 4096.
+    return (problem.input_rows == 5120 && problem.query_rows == 6144 &&
+            problem.kv_rows == 1024 && problem.padded_k == 5120) ||
+           (problem.input_rows == 4096 && problem.query_rows == 4096 &&
+            problem.kv_rows == 1024 && problem.padded_k == 4096);
 }
 
 } // namespace
@@ -90,8 +93,15 @@ void q4_q5_attn_input_execute_plan(const Q4Q5AttnInputPlan& plan, const Tensor& 
 
     switch (plan.schedule) {
     case Q4Q5AttnInputScheduleId::ParentSplitFixed:
-        q4_q5_attn_input_small_t_launch(x, query_key_weight, gate_value_weight, q, gate, k, v,
-                                        stream);
+        if (problem.input_rows == 4096) {
+            q4_q5_attn_input_small_t_launch<5120, 4096, 4096>(x, query_key_weight,
+                                                              gate_value_weight, q, gate, k, v,
+                                                              stream);
+        } else {
+            q4_q5_attn_input_small_t_launch<7168, 6144, 5120>(x, query_key_weight,
+                                                              gate_value_weight, q, gate, k, v,
+                                                              stream);
+        }
         return;
     case Q4Q5AttnInputScheduleId::GroupedHomogeneousPairMmaR16C64S3:
         q4_q5_attn_input_grouped_mma_r16_c64_s3_launch(x, query_key_weight, gate_value_weight, q,

@@ -69,6 +69,12 @@ using W8MtpAttentionOutputGeometry     = W8LinearGeometry<5120, 6144>;
 using W8MtpGateUpProjectionGeometry    = W8LinearGeometry<34816, 5120>;
 using W8MtpDownProjectionGeometry      = W8LinearGeometry<5120, 17408>;
 using W835bMtpProjectionGeometry       = W8LinearGeometry<2048, 4096>;
+// Qwen3.5-9B MTP geometry.
+using W8Mtp9BInputProjectionGeometry     = W8LinearGeometry<4096, 8192>;
+using W8Mtp9BAttentionProjectionGeometry = W8LinearGeometry<10240, 4096>;
+using W8Mtp9BAttentionOutputGeometry     = W8LinearGeometry<4096, 4096>;
+using W8Mtp9BGateUpProjectionGeometry    = W8LinearGeometry<24576, 4096>;
+using W8Mtp9BDownProjectionGeometry      = W8LinearGeometry<4096, 12288>;
 
 inline constexpr std::int32_t kW8VocabularyFirstSmallT         = 1;
 inline constexpr std::int32_t kW8VocabularyLastSmallT          = 33;
@@ -84,6 +90,19 @@ inline constexpr std::int32_t kW8MtpDownFirstSmallT            = 1;
 inline constexpr std::int32_t kW8MtpDownLastSmallT             = 48;
 inline constexpr std::int32_t kW835bMtpProjectionFirstSmallT   = 1;
 inline constexpr std::int32_t kW835bMtpProjectionLastSmallT    = 48;
+inline constexpr std::int32_t kW8Mtp9BFirstSmallT              = 1;
+inline constexpr std::int32_t kW8Mtp9BLastSmallT               = 48;
+
+template <class Geometry, int ActiveTokens>
+struct W8LinearSmallTProductionSchedule9B {
+    static_assert(ActiveTokens >= kW8Mtp9BFirstSmallT);
+    static_assert(ActiveTokens <= kW8Mtp9BLastSmallT);
+    static constexpr int kTileTokens = ActiveTokens <= 24 ? 8 : 4;
+    static constexpr int kKWarps     = ActiveTokens <= 24 ? 8 : 4;
+    static constexpr auto kScaleAccess = W8SmallTMmaScaleAccess::Shared;
+    static constexpr int kMinBlocks  = kKWarps == 4 ? 4 : 2;
+    using Type = W8SmallTMmaSchedule<kKWarps, kTileTokens, kMinBlocks, kScaleAccess>;
+};
 
 template <class Geometry, int ActiveTokens>
 struct W8LinearSmallTProductionSchedule;
@@ -98,6 +117,95 @@ struct W8LinearSmallTProductionSchedule<W8VocabularyProjectionGeometry, ActiveTo
                                        : ActiveTokens <= 24 ? 24
                                        : ActiveTokens <= 32 ? 32
                                                             : 40;
+    static constexpr int kKWarps     = ActiveTokens <= 24 ? 8 : 4;
+    static constexpr auto kScaleAccess = W8SmallTMmaScaleAccess::Shared;
+    static constexpr int kMinBlocks  = kKWarps == 4 ? 4 : 2;
+    using Type = W8SmallTMmaSchedule<kKWarps, kTileTokens, kMinBlocks, kScaleAccess>;
+};
+
+template <int ActiveTokens>
+struct W8LinearSmallTProductionSchedule<W8Mtp9BInputProjectionGeometry, ActiveTokens> {
+    static_assert(ActiveTokens >= kW8Mtp9BFirstSmallT);
+    static_assert(ActiveTokens <= kW8Mtp9BLastSmallT);
+
+    static constexpr int kTileTokens = ActiveTokens <= 8    ? 8
+                                       : ActiveTokens <= 16 ? 16
+                                       : ActiveTokens <= 24 ? 24
+                                       : ActiveTokens <= 32 ? 32
+                                       : ActiveTokens <= 40 ? 40
+                                                            : 48;
+    static constexpr int kKWarps     = ActiveTokens <= 24 ? 8 : 4;
+    static constexpr auto kScaleAccess = W8SmallTMmaScaleAccess::Shared;
+    static constexpr int kMinBlocks  = kKWarps == 4 ? 4 : 2;
+    using Type = W8SmallTMmaSchedule<kKWarps, kTileTokens, kMinBlocks, kScaleAccess>;
+};
+
+
+template <int ActiveTokens>
+struct W8LinearSmallTProductionSchedule<W8Mtp9BAttentionProjectionGeometry, ActiveTokens> {
+    static_assert(ActiveTokens >= kW8Mtp9BFirstSmallT);
+    static_assert(ActiveTokens <= kW8Mtp9BLastSmallT);
+
+    static constexpr int kTileTokens = ActiveTokens <= 8    ? 8
+                                       : ActiveTokens <= 16 ? 16
+                                       : ActiveTokens <= 24 ? 24
+                                       : ActiveTokens <= 32 ? 32
+                                       : ActiveTokens <= 40 ? 40
+                                                            : 48;
+    static constexpr int kKWarps     = ActiveTokens <= 24 ? 8 : 4;
+    static constexpr auto kScaleAccess = W8SmallTMmaScaleAccess::Shared;
+    static constexpr int kMinBlocks  = kKWarps == 4 ? 4 : 2;
+    using Type = W8SmallTMmaSchedule<kKWarps, kTileTokens, kMinBlocks, kScaleAccess>;
+};
+
+
+template <int ActiveTokens>
+struct W8LinearSmallTProductionSchedule<W8Mtp9BAttentionOutputGeometry, ActiveTokens> {
+    static_assert(ActiveTokens >= kW8Mtp9BFirstSmallT);
+    static_assert(ActiveTokens <= kW8Mtp9BLastSmallT);
+
+    static constexpr int kTileTokens = ActiveTokens <= 8    ? 8
+                                       : ActiveTokens <= 16 ? 16
+                                       : ActiveTokens <= 24 ? 24
+                                       : ActiveTokens <= 32 ? 32
+                                       : ActiveTokens <= 40 ? 40
+                                                            : 48;
+    static constexpr int kKWarps     = ActiveTokens <= 24 ? 8 : 4;
+    static constexpr auto kScaleAccess = W8SmallTMmaScaleAccess::Shared;
+    static constexpr int kMinBlocks  = kKWarps == 4 ? 4 : 2;
+    using Type = W8SmallTMmaSchedule<kKWarps, kTileTokens, kMinBlocks, kScaleAccess>;
+};
+
+
+template <int ActiveTokens>
+struct W8LinearSmallTProductionSchedule<W8Mtp9BGateUpProjectionGeometry, ActiveTokens> {
+    static_assert(ActiveTokens >= kW8Mtp9BFirstSmallT);
+    static_assert(ActiveTokens <= kW8Mtp9BLastSmallT);
+
+    static constexpr int kTileTokens = ActiveTokens <= 8    ? 8
+                                       : ActiveTokens <= 16 ? 16
+                                       : ActiveTokens <= 24 ? 24
+                                       : ActiveTokens <= 32 ? 32
+                                       : ActiveTokens <= 40 ? 40
+                                                            : 48;
+    static constexpr int kKWarps     = ActiveTokens <= 24 ? 8 : 4;
+    static constexpr auto kScaleAccess = W8SmallTMmaScaleAccess::Shared;
+    static constexpr int kMinBlocks  = kKWarps == 4 ? 4 : 2;
+    using Type = W8SmallTMmaSchedule<kKWarps, kTileTokens, kMinBlocks, kScaleAccess>;
+};
+
+
+template <int ActiveTokens>
+struct W8LinearSmallTProductionSchedule<W8Mtp9BDownProjectionGeometry, ActiveTokens> {
+    static_assert(ActiveTokens >= kW8Mtp9BFirstSmallT);
+    static_assert(ActiveTokens <= kW8Mtp9BLastSmallT);
+
+    static constexpr int kTileTokens = ActiveTokens <= 8    ? 8
+                                       : ActiveTokens <= 16 ? 16
+                                       : ActiveTokens <= 24 ? 24
+                                       : ActiveTokens <= 32 ? 32
+                                       : ActiveTokens <= 40 ? 40
+                                                            : 48;
     static constexpr int kKWarps     = ActiveTokens <= 24 ? 8 : 4;
     static constexpr auto kScaleAccess = W8SmallTMmaScaleAccess::Shared;
     static constexpr int kMinBlocks  = kKWarps == 4 ? 4 : 2;

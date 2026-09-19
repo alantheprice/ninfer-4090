@@ -56,7 +56,7 @@ struct ConvGeometry {
 };
 
 ConvGeometry require_snapshot_input(const Tensor& x, std::int32_t hidden) {
-    constexpr std::int32_t kMaximumBatch = 8;
+    constexpr std::int32_t kMaximumBatch = 64;
     constexpr std::int32_t kMaximumWidth = 16;
     const std::int32_t width             = x.ne[1];
     const std::int32_t batch             = x.ne[2];
@@ -68,7 +68,7 @@ ConvGeometry require_snapshot_input(const Tensor& x, std::int32_t hidden) {
 }
 
 ConvGeometry require_record_input(const Tensor& x, std::int32_t hidden) {
-    constexpr std::int32_t kMaximumBatch = 8;
+    constexpr std::int32_t kMaximumBatch = 64;
     constexpr std::int32_t kMinimumWidth = 2;
     constexpr std::int32_t kMaximumWidth = 16;
     const std::int32_t width             = x.ne[1];
@@ -170,7 +170,7 @@ void require_record_nonoverlap(const Tensor& x, const Tensor& conv_weight,
 
 void require_snapshot_capacity_domain(std::int32_t batch_size, std::int32_t min_width,
                                       std::int32_t max_width) {
-    constexpr std::int32_t kMaximumBatch = 8;
+    constexpr std::int32_t kMaximumBatch = 64;
     constexpr std::int32_t kMaximumWidth = 16;
     if (batch_size <= 0 || batch_size > kMaximumBatch || min_width <= 0 ||
         max_width < min_width || (batch_size > 1 && max_width > kMaximumWidth)) {
@@ -180,7 +180,7 @@ void require_snapshot_capacity_domain(std::int32_t batch_size, std::int32_t min_
 
 void require_record_capacity_domain(std::int32_t batch_size, std::int32_t min_width,
                                     std::int32_t max_width) {
-    constexpr std::int32_t kMaximumBatch = 8;
+    constexpr std::int32_t kMaximumBatch = 64;
     constexpr std::int32_t kMinimumWidth = 2;
     constexpr std::int32_t kMaximumWidth = 16;
     if (batch_size <= 0 || batch_size > kMaximumBatch || min_width < kMinimumWidth ||
@@ -189,20 +189,25 @@ void require_record_capacity_domain(std::int32_t batch_size, std::int32_t min_wi
     }
 }
 
-void require_rowsplit(const Weight& weight, QType qtype, std::int32_t rows, const char* label) {
+void require_rowsplit_k(const Weight& weight, QType qtype, std::int32_t rows, std::int32_t k,
+                        const char* label) {
     const bool q4_planes =
         qtype != QType::Q4G64_F16S || (weight.qhigh == nullptr && weight.high_plane_bytes == 0);
     const bool q5_planes =
         qtype != QType::Q5G64_F16S || (weight.qhigh != nullptr && weight.high_plane_bytes != 0);
     if (weight.qtype != qtype || weight.layout != QuantLayout::RowSplit ||
         weight.scale_dtype != DType::FP16 || weight.group_size != 64 || weight.group != 64 ||
-        weight.ndim != 2 || weight.n != rows || weight.k != 5120 || weight.shape[0] != rows ||
-        weight.shape[1] != 5120 || weight.padded_shape[0] != rows ||
-        weight.padded_shape[1] != 5120 || !q4_planes || !q5_planes ||
+        weight.ndim != 2 || weight.n != rows || weight.k != k || weight.shape[0] != rows ||
+        weight.shape[1] != k || weight.padded_shape[0] != rows ||
+        weight.padded_shape[1] != k || !q4_planes || !q5_planes ||
         !aligned_to(weight.qdata, 16) || !aligned_to(weight.scales, 4) ||
         (qtype == QType::Q5G64_F16S && !aligned_to(weight.qhigh, 16))) {
         throw std::invalid_argument(std::string("gdn_input_proj: invalid ") + label);
     }
+}
+
+void require_rowsplit(const Weight& weight, QType qtype, std::int32_t rows, const char* label) {
+    require_rowsplit_k(weight, qtype, rows, 5120, label);
 }
 
 void require_w8_rowsplit(const Weight& weight, std::int32_t rows, const char* label) {
@@ -432,19 +437,21 @@ void dispatch_single_parent_record(const Tensor& x, const Weight& weight, const 
 
 void gdn_input_proj(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
                     Tensor& qkv, Tensor& z, cudaStream_t stream) {
-    constexpr std::int32_t kHidden     = 5120;
-    constexpr std::int32_t kQkRows     = 4096;
-    constexpr std::int32_t kValueRows  = 6144;
-    constexpr std::int32_t kZRows      = 6144;
-    constexpr std::int32_t kQkvRows    = kQkRows + kValueRows;
-    constexpr std::int32_t kParentRows = kValueRows + kZRows;
-    const std::int32_t cols            = x.ne[1];
+    // Two registered split-weight geometries: 27B (hidden 5120) and 9B (hidden 4096).
+    const std::int32_t kHidden     = x.ne[0];
+    const bool          is_9b      = kHidden == 4096;
+    const std::int32_t kQkRows     = 4096;
+    const std::int32_t kValueRows  = is_9b ? 4096 : 6144;
+    const std::int32_t kZRows      = is_9b ? 4096 : 6144;
+    const std::int32_t kQkvRows    = kQkRows + kValueRows;
+    const std::int32_t kParentRows = kValueRows + kZRows;
+    const std::int32_t cols        = x.ne[1];
     if (cols <= 0) { throw std::invalid_argument("gdn_input_proj: T must be positive"); }
     require_matrix(x, kHidden, cols, "x");
     require_matrix(qkv, kQkvRows, cols, "qkv");
     require_matrix(z, kZRows, cols, "z");
-    require_rowsplit(qk_weight, QType::Q4G64_F16S, kQkRows, "qk weight");
-    require_rowsplit(value_z_weight, QType::Q5G64_F16S, kParentRows, "value/z weight");
+    require_rowsplit_k(qk_weight, QType::Q4G64_F16S, kQkRows, kHidden, "qk weight");
+    require_rowsplit_k(value_z_weight, QType::Q5G64_F16S, kParentRows, kHidden, "value/z weight");
 
     detail::q4_q5_gdn_input_dispatch(x, qk_weight, value_z_weight, qkv, z, stream);
 }
@@ -546,16 +553,20 @@ void gdn_input_proj_conv_snapshot(const Tensor& x, const Weight& qk_weight,
                                   const Tensor& snapshot_base_slots, Tensor& query, Tensor& key,
                                   Tensor& value, Tensor& z, WorkspaceArena& ws,
                                   cudaStream_t stream) {
-    constexpr std::int32_t kHidden     = 5120;
-    constexpr std::int32_t kQueryRows  = 2048;
-    constexpr std::int32_t kKeyRows    = 2048;
-    constexpr std::int32_t kValueRows  = 6144;
-    constexpr std::int32_t kZRows      = 6144;
-    constexpr std::int32_t kChannels   = kQueryRows + kKeyRows + kValueRows;
-    constexpr std::int32_t kParentRows = kValueRows + kZRows;
+    // Two registered split-weight geometries: 27B (hidden 5120, 48 value heads)
+    // and 9B (hidden 4096, 32 value heads). Q/K rows are 2*2048 in both.
+    const std::int32_t hidden     = x.ne[0];
+    const bool          is_9b     = hidden == 4096;
+    const std::int32_t kHidden     = hidden;
+    const std::int32_t kQueryRows  = 2048;
+    const std::int32_t kKeyRows    = 2048;
+    const std::int32_t kValueRows  = is_9b ? 4096 : 6144;
+    const std::int32_t kZRows      = is_9b ? 4096 : 6144;
+    const std::int32_t kChannels   = kQueryRows + kKeyRows + kValueRows;
+    const std::int32_t kParentRows = kValueRows + kZRows;
     const ConvGeometry geometry        = require_snapshot_input(x, kHidden);
-    require_rowsplit(qk_weight, QType::Q4G64_F16S, kQueryRows + kKeyRows, "qk weight");
-    require_rowsplit(value_z_weight, QType::Q5G64_F16S, kParentRows, "value/z weight");
+    require_rowsplit_k(qk_weight, QType::Q4G64_F16S, kQueryRows + kKeyRows, kHidden, "qk weight");
+    require_rowsplit_k(value_z_weight, QType::Q5G64_F16S, kParentRows, kHidden, "value/z weight");
     require_snapshot_operands(conv_weight, conv_states, valid_columns, initial_state_slots,
                               snapshot_base_slots, kChannels, geometry);
     require_conv_tensor(query, kQueryRows, geometry.width, geometry.batch,
@@ -600,16 +611,20 @@ void gdn_input_proj_conv_record(const Tensor& x, const Weight& qk_weight,
                                 const Tensor& initial_state_slots, Tensor& conv_record,
                                 Tensor& query, Tensor& key, Tensor& value, Tensor& z,
                                 WorkspaceArena& workspace, cudaStream_t stream) {
-    constexpr std::int32_t kHidden     = 5120;
-    constexpr std::int32_t kQueryRows  = 2048;
-    constexpr std::int32_t kKeyRows    = 2048;
-    constexpr std::int32_t kValueRows  = 6144;
-    constexpr std::int32_t kZRows      = 6144;
-    constexpr std::int32_t kChannels   = kQueryRows + kKeyRows + kValueRows;
-    constexpr std::int32_t kParentRows = kValueRows + kZRows;
+    // Two registered split-weight geometries: 27B (hidden 5120, 48 value heads)
+    // and 9B (hidden 4096, 32 value heads). Q/K rows are 2*2048 in both.
+    const std::int32_t hidden     = x.ne[0];
+    const bool          is_9b     = hidden == 4096;
+    const std::int32_t kHidden     = hidden;
+    const std::int32_t kQueryRows  = 2048;
+    const std::int32_t kKeyRows    = 2048;
+    const std::int32_t kValueRows  = is_9b ? 4096 : 6144;
+    const std::int32_t kZRows      = is_9b ? 4096 : 6144;
+    const std::int32_t kChannels   = kQueryRows + kKeyRows + kValueRows;
+    const std::int32_t kParentRows = kValueRows + kZRows;
     const ConvGeometry geometry        = require_record_input(x, kHidden);
-    require_rowsplit(qk_weight, QType::Q4G64_F16S, kQueryRows + kKeyRows, "qk weight");
-    require_rowsplit(value_z_weight, QType::Q5G64_F16S, kParentRows, "value/z weight");
+    require_rowsplit_k(qk_weight, QType::Q4G64_F16S, kQueryRows + kKeyRows, kHidden, "qk weight");
+    require_rowsplit_k(value_z_weight, QType::Q5G64_F16S, kParentRows, kHidden, "value/z weight");
     require_record_operands(conv_weight, conv_states, valid_columns, initial_state_slots, kChannels,
                             geometry);
     require_conv_tensor(conv_record, kChannels, geometry.width, geometry.batch,

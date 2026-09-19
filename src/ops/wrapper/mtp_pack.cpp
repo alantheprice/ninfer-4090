@@ -55,14 +55,20 @@ void mtp_split_attn_in(const Tensor& attn_in, Tensor& q, Tensor& k, Tensor& gate
     require_bf16_contiguous_nonnull(v, op, "v");
     const std::int32_t tokens = attn_in.ne[1];
     if (tokens <= 0) { throw std::invalid_argument("mtp_split_attn_in: T must be positive"); }
-    require_shape(attn_in, 14336, tokens, op, "attn_in");
-    if (q.ne[0] != 256 || q.ne[1] != 24 || q.ne[2] != tokens || q.ne[3] != 1) {
+    // 27B: packed rows 14336 (q 24 heads); 9B: packed rows 10240 (q 16 heads).
+    const std::int32_t packed_rows = attn_in.ne[0];
+    const std::int32_t q_heads     = packed_rows == 10240 ? 16 : 24;
+    if (packed_rows != 14336 && packed_rows != 10240) {
+        throw std::invalid_argument("mtp_split_attn_in: invalid shape for attn_in");
+    }
+    require_shape(attn_in, packed_rows, tokens, op, "attn_in");
+    if (q.ne[0] != 256 || q.ne[1] != q_heads || q.ne[2] != tokens || q.ne[3] != 1) {
         throw std::invalid_argument("mtp_split_attn_in: invalid shape for q");
     }
     if (k.ne[0] != 256 || k.ne[1] != 4 || k.ne[2] != tokens || k.ne[3] != 1) {
         throw std::invalid_argument("mtp_split_attn_in: invalid shape for k");
     }
-    if (gate.ne[0] != 256 || gate.ne[1] != 24 || gate.ne[2] != tokens || gate.ne[3] != 1) {
+    if (gate.ne[0] != 256 || gate.ne[1] != q_heads || gate.ne[2] != tokens || gate.ne[3] != 1) {
         throw std::invalid_argument("mtp_split_attn_in: invalid shape for gate");
     }
     if (v.ne[0] != 256 || v.ne[1] != 4 || v.ne[2] != tokens || v.ne[3] != 1) {

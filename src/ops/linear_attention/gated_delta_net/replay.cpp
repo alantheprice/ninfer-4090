@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "ninfer/ops/gated_delta_net.h"
 #include "ninfer/ops/gdn_replay.h"
 
@@ -19,7 +20,7 @@ namespace ninfer::ops {
 namespace {
 
 constexpr std::int32_t kStateDim    = detail::gated_delta_net::kStateDim;
-constexpr std::int32_t kMaximumRows = 8;
+constexpr std::int32_t kMaximumRows = 64;
 
 bool aligned_to(const void* pointer, std::uintptr_t alignment) {
     return pointer != nullptr && (reinterpret_cast<std::uintptr_t>(pointer) & (alignment - 1)) == 0;
@@ -156,7 +157,9 @@ bool is_registered_fold_geometry(const GdnReplayRecordSpec& spec) {
                              spec.conv_channels == 10240;
     const bool geometry_30 = spec.layers == 30 && spec.qk_heads == 16 && spec.value_heads == 32 &&
                              spec.conv_channels == 8192;
-    return geometry_48 || geometry_30;
+    const bool geometry_24 = spec.layers == 24 && spec.qk_heads == 16 && spec.value_heads == 32 &&
+                             spec.conv_channels == 8192;
+    return geometry_48 || geometry_30 || geometry_24;
 }
 
 void validate_fold_records(const GdnReplayRecords& records) {
@@ -289,10 +292,8 @@ void gated_delta_net_replay_record(const Tensor& q, const Tensor& k, const Tenso
                                    const Tensor& g, const Tensor& beta, float scale,
                                    const Tensor& ssm_states, const Tensor& valid_columns,
                                    const Tensor& initial_state_slots, Tensor& key_record,
-                                   Tensor& value_record, Tensor& gate_record, Tensor& out,
-                                   cudaStream_t stream) {
-    validate_replay_record(q, k, v, g, beta, scale, ssm_states, valid_columns, initial_state_slots,
-                           key_record, value_record, gate_record, out);
+                                   Tensor& value_record, Tensor& gate_record,                                    Tensor& out, cudaStream_t stream) {
+    validate_replay_record(q, k, v, g, beta, scale, ssm_states, valid_columns, initial_state_slots,key_record, value_record, gate_record, out);
     detail::gated_delta_net::launch_recurrent_record(q, k, v, g, beta, scale, ssm_states,
                                                      valid_columns, initial_state_slots, key_record,
                                                      value_record, gate_record, out, stream);

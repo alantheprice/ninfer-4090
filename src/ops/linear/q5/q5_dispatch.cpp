@@ -8,6 +8,24 @@ Q5Launch select_q5_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
     if (t <= 0) { throw std::invalid_argument("q5 linear: unsupported shape or T"); }
 
     switch (k) {
+    case 4096:
+        switch (n) {
+        case 1024:
+        case 2048:
+        case 4096:
+            if (t <= 16) { return launch_q5_small_t_mma; }
+            if (t <= 64) { return launch_q5_mma_r64_c32; }
+            if (t <= 128) { return launch_q5_mma_r64_c64; }
+            return launch_q5_mma_r64_c128;
+        case 12288:
+            if (t <= 16) { return launch_q5_small_t_mma; }
+            if (t <= 64) { return launch_q5_mma_r64_c32; }
+            if (t <= 128) { return launch_q5_mma_r64_c64; }
+            return launch_q5_mma_r64_c128;
+        default:
+            break;
+        }
+        break;
     case 5120:
         switch (n) {
         case 1024:

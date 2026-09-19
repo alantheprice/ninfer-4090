@@ -43,8 +43,8 @@ void validate_options(const EngineOptions& options) {
     case KvCapacityMode::Automatic:
         break;
     }
-    if (options.max_concurrency == 0 || options.max_concurrency > kMaximumConcurrency) {
-        throw std::invalid_argument("Engine max_concurrency must be in [1,8]");
+    if (options.max_concurrency == 0 || options.max_concurrency > kMaximumLanes) {
+        throw std::invalid_argument("Engine max_concurrency must not exceed kMaximumLanes");
     }
     if (options.max_pending_requests == 0 || options.pending_timeout_ms == 0) {
         throw std::invalid_argument("Engine pending request capacity and timeout must be nonzero");
@@ -201,6 +201,22 @@ Qwen3_6_35BA3BInstance::Qwen3_6_35BA3BInstance(std::unique_ptr<LoadedQwen3_6_35B
 
 Qwen3_6_35BA3BInstance::~Qwen3_6_35BA3BInstance() = default;
 
+LoadedQwen3_5_9B::LoadedQwen3_5_9B(std::unique_ptr<Qwen3_5_9B::LoadedModel> stable_model)
+    : model(std::move(stable_model)), frontend(Qwen3_5_9B::make_frontend(*model)) {}
+
+LoadedQwen3_5_9B::~LoadedQwen3_5_9B() = default;
+
+Qwen3_5_9BInstance::Qwen3_5_9BInstance(std::unique_ptr<LoadedQwen3_5_9B> stable_loaded,
+                                       runtime::KvCapacityResolution resolution,
+                                       Qwen3_5_9B::SequencePlan sequence_plan,
+                                       DeviceContext& device)
+    : loaded(std::move(stable_loaded)), kv_capacity_resolution(resolution),
+      request_memory(device, sequence_plan.request_transient_capacity_bytes()),
+      capacity(sequence_plan.capacity()),
+      program(Qwen3_5_9B::create_program(*loaded->model, std::move(sequence_plan), device)) {}
+
+Qwen3_5_9BInstance::~Qwen3_5_9BInstance() = default;
+
 ConstructedTarget construct_target(const EngineOptions& options, DeviceContext& device) {
     validate_options(options);
     const auto load_start = Clock::now();
@@ -214,6 +230,10 @@ ConstructedTarget construct_target(const EngineOptions& options, DeviceContext& 
     if (identity.model_id == Qwen3_6_27B::qwen3_8_model_id) {
         return construct_registered<Qwen3_6_27B, LoadedQwen3_6_27B, Qwen3_6_27BInstance>(
             options, device, reader, load_start, Qwen3_6_27B::qwen3_8_target_key);
+    }
+    if (identity.model_id == Qwen3_5_9B::model_id) {
+        return construct_registered<Qwen3_5_9B, LoadedQwen3_5_9B, Qwen3_5_9BInstance>(
+            options, device, reader, load_start, Qwen3_5_9B::target_key);
     }
     if (identity.model_id == Qwen3_6_35BA3B::model_id) {
         return construct_registered<Qwen3_6_35BA3B, LoadedQwen3_6_35BA3B, Qwen3_6_35BA3BInstance>(

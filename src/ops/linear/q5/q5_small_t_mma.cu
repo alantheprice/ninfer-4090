@@ -16,6 +16,10 @@ using Geom6144x5120  = Q5SmallTGeometry<6144, 5120>;
 using Geom7168x5120  = Q5SmallTGeometry<7168, 5120>;
 using Geom5120x6144  = Q5SmallTGeometry<5120, 6144>;
 using Geom5120x17408 = Q5SmallTGeometry<5120, 17408>;
+// Qwen3.5-9B geometry (hidden 4096, value_dim 4096, intermediate 12288).
+using Geom4096x4096   = Q5SmallTGeometry<4096, 4096>;
+using Geom4096x8192   = Q5SmallTGeometry<4096, 8192>;
+using Geom4096x12288  = Q5SmallTGeometry<4096, 12288>;
 
 template <class Geometry, int TileTokens, int ActiveTokens>
 void launch_exact(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
@@ -53,6 +57,12 @@ constexpr auto kLaunchers5120x6144 =
     make_launchers<Geom5120x6144>(std::make_index_sequence<16>{});
 constexpr auto kLaunchers5120x17408 =
     make_launchers<Geom5120x17408>(std::make_index_sequence<16>{});
+constexpr auto kLaunchers4096x4096 =
+    make_launchers<Geom4096x4096>(std::make_index_sequence<16>{});
+constexpr auto kLaunchers4096x8192 =
+    make_launchers<Geom4096x8192>(std::make_index_sequence<16>{});
+constexpr auto kLaunchers4096x12288 =
+    make_launchers<Geom4096x12288>(std::make_index_sequence<16>{});
 
 template <class Geometry, int TileTokens, int ActiveTokens>
 void launch_residual_exact(const Tensor& x, const Weight& weight, Tensor& out,
@@ -89,6 +99,12 @@ constexpr auto kResidualLaunchers5120x6144 =
     make_residual_launchers<Geom5120x6144>(std::make_index_sequence<16>{});
 constexpr auto kResidualLaunchers5120x17408 =
     make_residual_launchers<Geom5120x17408>(std::make_index_sequence<16>{});
+constexpr auto kResidualLaunchers4096x4096 =
+    make_residual_launchers<Geom4096x4096>(std::make_index_sequence<16>{});
+constexpr auto kResidualLaunchers4096x8192 =
+    make_residual_launchers<Geom4096x8192>(std::make_index_sequence<16>{});
+constexpr auto kResidualLaunchers4096x12288 =
+    make_residual_launchers<Geom4096x12288>(std::make_index_sequence<16>{});
 
 } // namespace
 
@@ -121,6 +137,18 @@ void launch_q5_small_t_mma(const Tensor& x, const Weight& weight, Tensor& out,
         kLaunchers5120x17408[idx](x, weight, out, stream);
         return;
     }
+    if (weight.n == 4096 && weight.k == 4096) {
+        kLaunchers4096x4096[idx](x, weight, out, stream);
+        return;
+    }
+    if (weight.n == 4096 && weight.k == 8192) {
+        kLaunchers4096x8192[idx](x, weight, out, stream);
+        return;
+    }
+    if (weight.n == 4096 && weight.k == 12288) {
+        kLaunchers4096x12288[idx](x, weight, out, stream);
+        return;
+    }
 
     throw std::invalid_argument("q5 small-t mma: unsupported shape");
 }
@@ -140,6 +168,18 @@ void launch_q5_linear_add_small_t_mma(const Tensor& x, const Weight& weight, Ten
     }
     if (weight.n == 5120 && weight.k == 17408) {
         kResidualLaunchers5120x17408[idx](x, weight, residual_out, stream);
+        return;
+    }
+    if (weight.n == 4096 && weight.k == 4096) {
+        kResidualLaunchers4096x4096[idx](x, weight, residual_out, stream);
+        return;
+    }
+    if (weight.n == 4096 && weight.k == 8192) {
+        kResidualLaunchers4096x8192[idx](x, weight, residual_out, stream);
+        return;
+    }
+    if (weight.n == 4096 && weight.k == 12288) {
+        kResidualLaunchers4096x12288[idx](x, weight, residual_out, stream);
         return;
     }
 

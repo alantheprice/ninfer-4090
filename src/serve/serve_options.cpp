@@ -322,8 +322,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         options.kv_capacity.explicit_tokens < options.max_context) {
         throw std::invalid_argument("--kv-capacity must be at least --max-context");
     }
-    if (options.max_concurrency == 0 || options.max_concurrency > kMaximumConcurrency) {
-        throw std::invalid_argument("--max-concurrency must be in [1,8]");
+    if (options.max_concurrency == 0 || options.max_concurrency > kMaximumLanes) {
+        throw std::invalid_argument("--max-concurrency must not exceed kMaximumLanes");
     }
     if (options.max_pending_requests == 0) {
         throw std::invalid_argument("--max-pending-requests must be positive");

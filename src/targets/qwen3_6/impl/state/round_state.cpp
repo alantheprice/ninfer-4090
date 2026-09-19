@@ -41,8 +41,8 @@ void validate_spec(const RoundStateSpec& spec) {
         throw std::invalid_argument(
             "RoundState DFlash draft window exceeds the decode frame domain");
     }
-    if (spec.batch_capacity == 0 || spec.batch_capacity > kMaximumConcurrency) {
-        throw std::invalid_argument("RoundState batch capacity must be in [1,8]");
+    if (spec.batch_capacity == 0 || spec.batch_capacity > kMaximumLanes) {
+        throw std::invalid_argument("RoundState batch capacity must not exceed kMaximumLanes");
     }
     (void)checked_i32(static_cast<std::uint64_t>(spec.draft_window) + 1ULL,
                       "RoundState draft window exceeds int32");
@@ -81,8 +81,8 @@ RoundStateLayout begin_round_state_layout(LayoutBuilder& builder, const RoundSta
 OrdinaryDecodeState::OrdinaryDecodeState(DeviceSpan backing,
                                          const OrdinaryDecodeStateLayout& layout,
                                          std::uint32_t batch_capacity) {
-    if (batch_capacity == 0 || batch_capacity > kMaximumConcurrency) {
-        throw std::invalid_argument("ordinary decode batch capacity must be in [1,8]");
+    if (batch_capacity == 0 || batch_capacity > kMaximumLanes) {
+        throw std::invalid_argument("ordinary decode batch capacity must not exceed kMaximumLanes");
     }
     static_assert(std::is_standard_layout_v<OrdinaryDecodeIngress>);
     static_assert(std::is_standard_layout_v<OrdinaryDecodeEgress>);
@@ -214,7 +214,7 @@ DFlashPrefillState::DFlashPrefillState(DeviceSpan backing, const DFlashPrefillSt
 
 MtpDecodeState::MtpDecodeState(DeviceSpan backing, const MtpDecodeStateLayout& layout,
                                std::uint32_t batch_capacity, std::uint32_t draft_window) {
-    if (batch_capacity == 0 || batch_capacity > kMaximumConcurrency || draft_window == 0 ||
+    if (batch_capacity == 0 || batch_capacity > kMaximumLanes || draft_window == 0 ||
         draft_window > kMtpDecodeMaximumDrafts) {
         throw std::invalid_argument("MTP decode state dimensions are outside the supported domain");
     }
@@ -286,7 +286,7 @@ MtpDecodeState::MtpDecodeState(DeviceSpan backing, const MtpDecodeStateLayout& l
 
 DFlashDecodeState::DFlashDecodeState(DeviceSpan backing, const DFlashDecodeStateLayout& layout,
                                      std::uint32_t batch_capacity, std::uint32_t draft_window) {
-    if (batch_capacity == 0 || batch_capacity > kMaximumConcurrency || draft_window == 0 ||
+    if (batch_capacity == 0 || batch_capacity > kMaximumLanes || draft_window == 0 ||
         draft_window > kDFlashDecodeMaximumDrafts) {
         throw std::invalid_argument(
             "DFlash decode state dimensions are outside the supported domain");

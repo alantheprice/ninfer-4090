@@ -20,15 +20,20 @@
 namespace ninfer::ops::detail {
 namespace {
 
-constexpr int kHidden      = 5120;
-constexpr int kQueryRows   = 2048;
-constexpr int kKeyRows     = 2048;
-constexpr int kValueRows   = 6144;
-constexpr int kZRows       = 6144;
-constexpr int kValueZRows  = kValueRows + kZRows;
-constexpr int kQkRows      = kQueryRows + kKeyRows;
-constexpr int kChannels    = kQkRows + kValueRows;
-constexpr int kValueOffset = kQkRows;
+// Geometry is selected per launch: 27B (hidden 5120, 48 value heads) and
+// 9B (hidden 4096, 32 value heads) share every kernel below.
+template <int CHidden>
+struct ConvGeom {
+    static constexpr int kHidden      = CHidden;
+    static constexpr int kQueryRows   = 2048;
+    static constexpr int kKeyRows     = 2048;
+    static constexpr int kValueRows   = CHidden == 4096 ? 4096 : 6144;
+    static constexpr int kZRows       = kValueRows;
+    static constexpr int kValueZRows  = kValueRows + kZRows;
+    static constexpr int kQkRows      = kQueryRows + kKeyRows;
+    static constexpr int kChannels    = kQkRows + kValueRows;
+    static constexpr int kValueOffset = kQkRows;
+};
 
 using Q4ScheduleC4 = Q4RowSplitSimtGemmSchedule<8, 4, 16, 2, Cache::ca, 1>;
 using Q4ScheduleC8 = Q4RowSplitSimtGemmSchedule<8, 8, 16, 2, Cache::ca, 1>;
@@ -38,7 +43,7 @@ enum class PdlOrder {
     Q5ThenQ4,
 };
 
-template <class Publish>
+template <int CH, class Publish>
 GdnConvEpilogue<Publish> make_epilogue(const Tensor& conv_weight, const Tensor& conv_states,
                                        const Tensor& valid_columns, const Tensor& initial_slot,
                                        Tensor& query, Tensor& key, Tensor& value,
@@ -52,10 +57,10 @@ GdnConvEpilogue<Publish> make_epilogue(const Tensor& conv_weight, const Tensor& 
         static_cast<__nv_bfloat16*>(query.data),
         static_cast<__nv_bfloat16*>(key.data),
         static_cast<__nv_bfloat16*>(value.data),
-        kChannels,
-        kQueryRows,
-        kKeyRows,
-        kValueRows,
+        ConvGeom<CH>::kChannels,
+        ConvGeom<CH>::kQueryRows,
+        ConvGeom<CH>::kKeyRows,
+        ConvGeom<CH>::kValueRows,
         global_row_offset,
         static_cast<std::int32_t>(query.ne[1]),
         0,
@@ -90,7 +95,7 @@ struct Q4GdnSmallTEpilogue {
     }
 };
 
-template <class Publish>
+template <int CH, class Publish>
 struct Q5GdnDecodeEpilogue {
     GdnConvEpilogue<Publish> conv;
     __nv_bfloat16* z;
@@ -98,16 +103,16 @@ struct Q5GdnDecodeEpilogue {
     template <bool, int>
     __device__ __forceinline__ void operator()(__nv_bfloat16*, __nv_bfloat16*, int row,
                                                float value) const {
-        if (row < kValueRows) {
+        if (row < ConvGeom<CH>::kValueRows) {
             const float projected[1]{value};
             conv.store(row, projected);
         } else {
-            z[row - kValueRows] = __float2bfloat16_rn(value);
+            z[row - ConvGeom<CH>::kValueRows] = __float2bfloat16_rn(value);
         }
     }
 };
 
-template <int Tokens, class Publish>
+template <int CH, int Tokens, class Publish>
 struct Q5GdnSmallTEpilogue {
     GdnConvEpilogue<Publish> conv;
     __nv_bfloat16* z;
@@ -117,13 +122,13 @@ struct Q5GdnSmallTEpilogue {
                                                std::int32_t, std::int32_t row,
                                                const float (&values)[ProducedTokens]) const {
         static_assert(ProducedTokens == Tokens);
-        if (row < kValueRows) {
+        if (row < ConvGeom<CH>::kValueRows) {
             conv.store(row, values);
         } else {
 #pragma unroll
             for (int token = 0; token < Tokens; ++token) {
-                z[static_cast<std::int64_t>(token) * kZRows + row - kValueRows] =
-                    __float2bfloat16_rn(values[token]);
+                z[static_cast<std::int64_t>(token) * ConvGeom<CH>::kZRows + row -
+                  ConvGeom<CH>::kValueRows] = __float2bfloat16_rn(values[token]);
             }
         }
     }
@@ -168,7 +173,7 @@ struct Q4GdnMmaConvEpilogue {
     }
 };
 
-template <int Tokens, class Publish>
+template <int CH, int Tokens, class Publish>
 struct Q5GdnMmaConvEpilogue {
     static constexpr bool kIsTileEpilogue = true;
     GdnConvEpilogue<Publish> conv;
@@ -203,12 +208,13 @@ struct Q5GdnMmaConvEpilogue {
                     projected[t] = smem[lane][t];
                 }
 
-                if (local_row < kValueRows) {
+                if (local_row < ConvGeom<CH>::kValueRows) {
                     conv.store(local_row, projected);
                 } else {
 #pragma unroll
                     for (int t = 0; t < Tokens; ++t) {
-                        z[static_cast<std::int64_t>(t) * kZRows + (local_row - kValueRows)] =
+                        z[static_cast<std::int64_t>(t) * ConvGeom<CH>::kZRows +
+                          (local_row - ConvGeom<CH>::kValueRows)] =
                             __float2bfloat16_rn(projected[t]);
                     }
                 }
@@ -217,11 +223,11 @@ struct Q5GdnMmaConvEpilogue {
     }
 };
 
-template <class Publish, bool TriggerPdl, bool JoinPdl, bool Dependent>
+template <int CH, class Publish, bool TriggerPdl, bool JoinPdl, bool Dependent>
 void launch_q4_t1(const Tensor& x, const Weight& qk_weight,
                   const GdnConvEpilogue<Publish>& qk_epilogue, Tensor& query, cudaStream_t stream) {
     constexpr int q4_threads = Q4GemvR1W8DirectSchedule::kThreads;
-    constexpr int q4_blocks  = kQkRows / Q4GemvR1W8DirectSchedule::kRowsPerCta;
+    constexpr int q4_blocks  = ConvGeom<CH>::kQkRows / Q4GemvR1W8DirectSchedule::kRowsPerCta;
     if constexpr (Dependent) {
         CUDA_CHECK(pdl::launch_dependent(
             {dim3(q4_blocks), dim3(q4_threads), 0, stream},
@@ -230,56 +236,62 @@ void launch_q4_t1(const Tensor& x, const Weight& qk_weight,
             static_cast<const __nv_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(qk_weight.qdata),
             static_cast<const std::uint8_t*>(qk_weight.scales),
-            static_cast<__nv_bfloat16*>(query.data), nullptr, kQkRows, kHidden,
-            Q4GdnDecodeEpilogue<Publish>{qk_epilogue}));
+            static_cast<__nv_bfloat16*>(query.data), nullptr, ConvGeom<CH>::kQkRows,
+            ConvGeom<CH>::kHidden, Q4GdnDecodeEpilogue<Publish>{qk_epilogue}));
     } else {
         q4_rowsplit_gemv_kernel<Q4GemvR1W8DirectSchedule, false, 0, Q4GdnDecodeEpilogue<Publish>,
                                 TriggerPdl, JoinPdl><<<q4_blocks, q4_threads, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(qk_weight.qdata),
             static_cast<const std::uint8_t*>(qk_weight.scales),
-            static_cast<__nv_bfloat16*>(query.data), nullptr, kQkRows, kHidden,
-            Q4GdnDecodeEpilogue<Publish>{qk_epilogue});
+            static_cast<__nv_bfloat16*>(query.data), nullptr, ConvGeom<CH>::kQkRows,
+            ConvGeom<CH>::kHidden, Q4GdnDecodeEpilogue<Publish>{qk_epilogue});
     }
 }
 
-template <class Publish, bool TriggerPdl, bool JoinPdl, bool Dependent>
+template <int CH, class Publish, bool TriggerPdl, bool JoinPdl, bool Dependent>
 void launch_q5_t1(const Tensor& x, const Weight& value_z_weight,
                   const GdnConvEpilogue<Publish>& value_epilogue, Tensor& value, Tensor& z,
                   cudaStream_t stream) {
     constexpr int q5_rows_per_block = 16;
     constexpr int q5_threads        = q5_rows_per_block * 32;
-    constexpr int q5_blocks         = kValueZRows / q5_rows_per_block;
+    constexpr int q5_blocks         = ConvGeom<CH>::kValueZRows / q5_rows_per_block;
     if constexpr (Dependent) {
         CUDA_CHECK(pdl::launch_dependent(
             {dim3(q5_blocks), dim3(q5_threads), 0, stream},
-            q5_rowsplit_gemv_kernel<kValueZRows, kHidden, q5_rows_per_block, 2, true, false, true,
-                                    kValueRows, Q5GdnDecodeEpilogue<Publish>, TriggerPdl, JoinPdl>,
+            q5_rowsplit_gemv_kernel<ConvGeom<CH>::kValueZRows, ConvGeom<CH>::kHidden,
+                                    q5_rows_per_block, 2, true, false, true,
+                                    ConvGeom<CH>::kValueRows, Q5GdnDecodeEpilogue<CH, Publish>,
+                                    TriggerPdl, JoinPdl>,
             static_cast<const __nv_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(value_z_weight.qdata),
             static_cast<const std::uint8_t*>(value_z_weight.qhigh),
             static_cast<const std::uint8_t*>(value_z_weight.scales),
             static_cast<__nv_bfloat16*>(value.data), static_cast<__nv_bfloat16*>(z.data),
-            Q5GdnDecodeEpilogue<Publish>{value_epilogue, static_cast<__nv_bfloat16*>(z.data)}));
+            Q5GdnDecodeEpilogue<CH, Publish>{value_epilogue,
+                                             static_cast<__nv_bfloat16*>(z.data)}));
     } else {
-        q5_rowsplit_gemv_kernel<kValueZRows, kHidden, q5_rows_per_block, 2, true, false, true,
-                                kValueRows, Q5GdnDecodeEpilogue<Publish>, TriggerPdl, JoinPdl>
+        q5_rowsplit_gemv_kernel<ConvGeom<CH>::kValueZRows, ConvGeom<CH>::kHidden,
+                                q5_rows_per_block, 2, true, false, true,
+                                ConvGeom<CH>::kValueRows, Q5GdnDecodeEpilogue<CH, Publish>,
+                                TriggerPdl, JoinPdl>
             <<<q5_blocks, q5_threads, 0, stream>>>(
                 static_cast<const __nv_bfloat16*>(x.data),
                 static_cast<const std::uint8_t*>(value_z_weight.qdata),
                 static_cast<const std::uint8_t*>(value_z_weight.qhigh),
                 static_cast<const std::uint8_t*>(value_z_weight.scales),
                 static_cast<__nv_bfloat16*>(value.data), static_cast<__nv_bfloat16*>(z.data),
-                Q5GdnDecodeEpilogue<Publish>{value_epilogue, static_cast<__nv_bfloat16*>(z.data)});
+                Q5GdnDecodeEpilogue<CH, Publish>{value_epilogue,
+                                                 static_cast<__nv_bfloat16*>(z.data)});
     }
 }
 
-template <int Tokens, class Q4Schedule, class Publish, bool TriggerPdl, bool JoinPdl,
+template <int CH, int Tokens, class Q4Schedule, class Publish, bool TriggerPdl, bool JoinPdl,
           bool Dependent>
 void launch_q4_small_t(const Tensor& x, const Weight& qk_weight,
                        const GdnConvEpilogue<Publish>& qk_epilogue, Tensor& query,
                        cudaStream_t stream) {
-    const dim3 q4_grid(kQkRows / Q4Schedule::kRowsPerCta, 1u, 1u);
+    const dim3 q4_grid(ConvGeom<CH>::kQkRows / Q4Schedule::kRowsPerCta, 1u, 1u);
     if constexpr (Dependent) {
         CUDA_CHECK(pdl::launch_dependent(
             {q4_grid, dim3(Q4Schedule::kThreads), 0, stream},
@@ -288,8 +300,9 @@ void launch_q4_small_t(const Tensor& x, const Weight& qk_weight,
             static_cast<const __nv_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(qk_weight.qdata),
             static_cast<const std::uint8_t*>(qk_weight.scales),
-            static_cast<__nv_bfloat16*>(query.data), nullptr, kQueryRows, 0, kQkRows, kHidden,
-            Tokens, kHidden, Q4GdnSmallTEpilogue<Tokens, Publish>{qk_epilogue}));
+            static_cast<__nv_bfloat16*>(query.data), nullptr, ConvGeom<CH>::kQueryRows, 0,
+            ConvGeom<CH>::kQkRows, ConvGeom<CH>::kHidden, Tokens, ConvGeom<CH>::kHidden,
+            Q4GdnSmallTEpilogue<Tokens, Publish>{qk_epilogue}));
     } else {
         q4_rowsplit_gemm_simt_kernel<Q4Schedule, false, false, 0,
                                      Q4GdnSmallTEpilogue<Tokens, Publish>, TriggerPdl, JoinPdl>
@@ -297,52 +310,58 @@ void launch_q4_small_t(const Tensor& x, const Weight& qk_weight,
                 static_cast<const __nv_bfloat16*>(x.data),
                 static_cast<const std::uint8_t*>(qk_weight.qdata),
                 static_cast<const std::uint8_t*>(qk_weight.scales),
-                static_cast<__nv_bfloat16*>(query.data), nullptr, kQueryRows, 0, kQkRows, kHidden,
-                Tokens, kHidden, Q4GdnSmallTEpilogue<Tokens, Publish>{qk_epilogue});
+                static_cast<__nv_bfloat16*>(query.data), nullptr, ConvGeom<CH>::kQueryRows, 0,
+                ConvGeom<CH>::kQkRows, ConvGeom<CH>::kHidden, Tokens, ConvGeom<CH>::kHidden,
+                Q4GdnSmallTEpilogue<Tokens, Publish>{qk_epilogue});
     }
 }
 
-template <int Tokens, class Publish, bool TriggerPdl, bool JoinPdl, bool Dependent>
+template <int CH, int Tokens, class Publish, bool TriggerPdl, bool JoinPdl, bool Dependent>
 void launch_q5_small_t(const Tensor& x, const Weight& value_z_weight,
                        const GdnConvEpilogue<Publish>& value_epilogue, Tensor& value, Tensor& z,
                        cudaStream_t stream) {
     constexpr int q5_threads = 4 * 32;
-    const dim3 q5_grid(kValueZRows, 1u, 1u);
+    const dim3 q5_grid(ConvGeom<CH>::kValueZRows, 1u, 1u);
     if constexpr (Dependent) {
         CUDA_CHECK(pdl::launch_dependent(
             {q5_grid, dim3(q5_threads), 0, stream},
-            q5_rowsplit_gemm_simt_split4_kernel<Q5RowSplitSimtSchedule, Tokens, 5, kHidden, true,
-                                                kValueRows, Q5GdnSmallTEpilogue<Tokens, Publish>,
-                                                TriggerPdl, JoinPdl>,
+            q5_rowsplit_gemm_simt_split4_kernel<
+                Q5RowSplitSimtSchedule, Tokens, 5, ConvGeom<CH>::kHidden, true,
+                ConvGeom<CH>::kValueRows, Q5GdnSmallTEpilogue<CH, Tokens, Publish>, TriggerPdl,
+                JoinPdl>,
             static_cast<const __nv_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(value_z_weight.qdata),
             static_cast<const std::uint8_t*>(value_z_weight.qhigh),
             static_cast<const std::uint8_t*>(value_z_weight.scales),
             static_cast<__nv_bfloat16*>(value.data), static_cast<__nv_bfloat16*>(z.data),
-            kValueZRows, kValueRows, kHidden, Tokens, kHidden, 5,
-            Q5GdnSmallTEpilogue<Tokens, Publish>{
+            ConvGeom<CH>::kValueZRows, ConvGeom<CH>::kValueRows, ConvGeom<CH>::kHidden, Tokens,
+            ConvGeom<CH>::kHidden, 5,
+            Q5GdnSmallTEpilogue<CH, Tokens, Publish>{
                 value_epilogue,
                 static_cast<__nv_bfloat16*>(z.data),
             }));
     } else {
-        q5_rowsplit_gemm_simt_split4_kernel<Q5RowSplitSimtSchedule, Tokens, 5, kHidden, true,
-                                            kValueRows, Q5GdnSmallTEpilogue<Tokens, Publish>,
-                                            TriggerPdl, JoinPdl>
+        q5_rowsplit_gemm_simt_split4_kernel<Q5RowSplitSimtSchedule, Tokens, 5,
+                                            ConvGeom<CH>::kHidden, true,
+                                            ConvGeom<CH>::kValueRows,
+                                            Q5GdnSmallTEpilogue<CH, Tokens, Publish>, TriggerPdl,
+                                            JoinPdl>
             <<<q5_grid, q5_threads, 0, stream>>>(
                 static_cast<const __nv_bfloat16*>(x.data),
                 static_cast<const std::uint8_t*>(value_z_weight.qdata),
                 static_cast<const std::uint8_t*>(value_z_weight.qhigh),
                 static_cast<const std::uint8_t*>(value_z_weight.scales),
                 static_cast<__nv_bfloat16*>(value.data), static_cast<__nv_bfloat16*>(z.data),
-                kValueZRows, kValueRows, kHidden, Tokens, kHidden, 5,
-                Q5GdnSmallTEpilogue<Tokens, Publish>{
+                ConvGeom<CH>::kValueZRows, ConvGeom<CH>::kValueRows, ConvGeom<CH>::kHidden, Tokens,
+                ConvGeom<CH>::kHidden, 5,
+                Q5GdnSmallTEpilogue<CH, Tokens, Publish>{
                     value_epilogue,
                     static_cast<__nv_bfloat16*>(z.data),
                 });
     }
 }
 
-template <PdlOrder Order, class Publish>
+template <int CH, PdlOrder Order, class Publish>
 void launch_t1(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
                const GdnConvEpilogue<Publish>& qk_epilogue,
                const GdnConvEpilogue<Publish>& value_epilogue, Tensor& query, Tensor& value,
@@ -350,47 +369,49 @@ void launch_t1(const Tensor& x, const Weight& qk_weight, const Weight& value_z_w
     // The Q4 and Q5 sides read the same activation but write disjoint output/state rows. The
     // dependent side therefore computes before waiting, then joins the producer at kernel exit.
     if constexpr (Order == PdlOrder::Q5ThenQ4) {
-        launch_q5_t1<Publish, true, false, false>(x, value_z_weight, value_epilogue, value, z,
-                                                  stream);
-        launch_q4_t1<Publish, false, true, true>(x, qk_weight, qk_epilogue, query, stream);
+        launch_q5_t1<CH, Publish, true, false, false>(x, value_z_weight, value_epilogue, value, z,
+                                                      stream);
+        launch_q4_t1<CH, Publish, false, true, true>(x, qk_weight, qk_epilogue, query, stream);
     } else {
-        launch_q4_t1<Publish, true, false, false>(x, qk_weight, qk_epilogue, query, stream);
-        launch_q5_t1<Publish, false, true, true>(x, value_z_weight, value_epilogue, value, z,
-                                                 stream);
+        launch_q4_t1<CH, Publish, true, false, false>(x, qk_weight, qk_epilogue, query, stream);
+        launch_q5_t1<CH, Publish, false, true, true>(x, value_z_weight, value_epilogue, value, z,
+                                                     stream);
     }
 }
 
-template <int Tokens, class Q4Schedule, PdlOrder Order, class Publish>
+template <int CH, int Tokens, class Q4Schedule, PdlOrder Order, class Publish>
 void launch_small_t_schedule(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
                              const GdnConvEpilogue<Publish>& qk_epilogue,
                              const GdnConvEpilogue<Publish>& value_epilogue, Tensor& query,
                              Tensor& value, Tensor& z, cudaStream_t stream) {
     if constexpr (Order == PdlOrder::Q5ThenQ4) {
-        launch_q5_small_t<Tokens, Publish, true, false, false>(x, value_z_weight, value_epilogue,
-                                                               value, z, stream);
-        launch_q4_small_t<Tokens, Q4Schedule, Publish, false, true, true>(x, qk_weight, qk_epilogue,
-                                                                          query, stream);
-    } else {
-        launch_q4_small_t<Tokens, Q4Schedule, Publish, true, false, false>(
+        launch_q5_small_t<CH, Tokens, Publish, true, false, false>(x, value_z_weight,
+                                                                   value_epilogue, value, z,
+                                                                   stream);
+        launch_q4_small_t<CH, Tokens, Q4Schedule, Publish, false, true, true>(
             x, qk_weight, qk_epilogue, query, stream);
-        launch_q5_small_t<Tokens, Publish, false, true, true>(x, value_z_weight, value_epilogue,
-                                                              value, z, stream);
+    } else {
+        launch_q4_small_t<CH, Tokens, Q4Schedule, Publish, true, false, false>(
+            x, qk_weight, qk_epilogue, query, stream);
+        launch_q5_small_t<CH, Tokens, Publish, false, true, true>(x, value_z_weight,
+                                                                  value_epilogue, value, z,
+                                                                  stream);
     }
 }
 
-template <int Tokens, PdlOrder Order, class Publish>
+template <int CH, int Tokens, PdlOrder Order, class Publish>
 void launch_small_t_mma(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
                         const GdnConvEpilogue<Publish>& qk_epilogue,
                         const GdnConvEpilogue<Publish>& value_epilogue, Tensor& query, Tensor& value,
                         Tensor& z, cudaStream_t stream) {
     constexpr int TileCols = Tokens <= 8 ? 8 : 16;
-    using Q4Geometry = Q4SmallTGeometry<kQkRows, kHidden>;
-    using Q5Geometry = Q5SmallTGeometry<kValueZRows, kHidden>;
+    using Q4Geometry = Q4SmallTGeometry<ConvGeom<CH>::kQkRows, ConvGeom<CH>::kHidden>;
+    using Q5Geometry = Q5SmallTGeometry<ConvGeom<CH>::kValueZRows, ConvGeom<CH>::kHidden>;
     using Q4Epilogue = Q4GdnMmaConvEpilogue<Tokens, Publish>;
-    using Q5Epilogue = Q5GdnMmaConvEpilogue<Tokens, Publish>;
+    using Q5Epilogue = Q5GdnMmaConvEpilogue<CH, Tokens, Publish>;
 
-    constexpr int kQ4Blocks = kQkRows / Q4DraftSmallTSchedule::kRowsPerCta; // 4096 / 16 = 256
-    constexpr int kQ5Blocks = kValueZRows / Q5SmallTSchedule::kRowsPerCta;  // 12288 / 16 = 768
+    constexpr int kQ4Blocks = ConvGeom<CH>::kQkRows / Q4DraftSmallTSchedule::kRowsPerCta;
+    constexpr int kQ5Blocks = ConvGeom<CH>::kValueZRows / Q5SmallTSchedule::kRowsPerCta;
 
     const auto in_ld    = static_cast<std::int32_t>(x.nb[1] / sizeof(__nv_bfloat16));
     const auto value_ld = static_cast<std::int32_t>(value.nb[1] / sizeof(__nv_bfloat16));
@@ -428,51 +449,52 @@ void launch_small_t_mma(const Tensor& x, const Weight& qk_weight, const Weight& 
     }
 }
 
-template <int Tokens, PdlOrder Order, class Publish>
+template <int CH, int Tokens, PdlOrder Order, class Publish>
 void launch_small_t(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
                     const GdnConvEpilogue<Publish>& qk_epilogue,
                     const GdnConvEpilogue<Publish>& value_epilogue, Tensor& query, Tensor& value,
                     Tensor& z, cudaStream_t stream) {
     if constexpr (Tokens <= 4) {
-        launch_small_t_schedule<Tokens, Q4ScheduleC4, Order, Publish>(
+        launch_small_t_schedule<CH, Tokens, Q4ScheduleC4, Order, Publish>(
             x, qk_weight, value_z_weight, qk_epilogue, value_epilogue, query, value, z, stream);
     } else {
-        launch_small_t_schedule<Tokens, Q4ScheduleC8, Order, Publish>(
+        launch_small_t_schedule<CH, Tokens, Q4ScheduleC8, Order, Publish>(
             x, qk_weight, value_z_weight, qk_epilogue, value_epilogue, query, value, z, stream);
     }
 }
 
-template <PdlOrder Order, class Publish>
+template <int CH, PdlOrder Order, class Publish>
 void launch_conv(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
                  const Tensor& conv_weight, const Tensor& conv_states, const Tensor& valid_columns,
                  const Tensor& initial_slot, Tensor& query, Tensor& key, Tensor& value, Tensor& z,
                  Publish publish, cudaStream_t stream) {
-    const GdnConvEpilogue<Publish> qk_epilogue = make_epilogue(
-        conv_weight, conv_states, valid_columns, initial_slot, query, key, value, 0, publish);
+    const GdnConvEpilogue<Publish> qk_epilogue =
+        make_epilogue<CH>(conv_weight, conv_states, valid_columns, initial_slot, query, key, value,
+                          0, publish);
     const GdnConvEpilogue<Publish> value_epilogue =
-        make_epilogue(conv_weight, conv_states, valid_columns, initial_slot, query, key, value,
-                      kValueOffset, publish);
+        make_epilogue<CH>(conv_weight, conv_states, valid_columns, initial_slot, query, key, value,
+                          ConvGeom<CH>::kValueOffset, publish);
 
     switch (x.ne[1]) {
     case 1:
-        launch_t1<Order, Publish>(x, qk_weight, value_z_weight, qk_epilogue, value_epilogue, query,
-                                  value, z, stream);
+        launch_t1<CH, Order, Publish>(x, qk_weight, value_z_weight, qk_epilogue, value_epilogue,
+                                      query, value, z, stream);
         break;
     case 2:
-        launch_small_t_mma<2, Order, Publish>(x, qk_weight, value_z_weight, qk_epilogue,
-                                              value_epilogue, query, value, z, stream);
+        launch_small_t_mma<CH, 2, Order, Publish>(x, qk_weight, value_z_weight, qk_epilogue,
+                                                  value_epilogue, query, value, z, stream);
         break;
     case 3:
-        launch_small_t_mma<3, Order, Publish>(x, qk_weight, value_z_weight, qk_epilogue,
-                                              value_epilogue, query, value, z, stream);
+        launch_small_t_mma<CH, 3, Order, Publish>(x, qk_weight, value_z_weight, qk_epilogue,
+                                                  value_epilogue, query, value, z, stream);
         break;
     case 5:
-        launch_small_t_mma<5, Order, Publish>(x, qk_weight, value_z_weight, qk_epilogue,
-                                              value_epilogue, query, value, z, stream);
+        launch_small_t_mma<CH, 5, Order, Publish>(x, qk_weight, value_z_weight, qk_epilogue,
+                                                  value_epilogue, query, value, z, stream);
         break;
     case 6:
-        launch_small_t_mma<6, Order, Publish>(x, qk_weight, value_z_weight, qk_epilogue,
-                                              value_epilogue, query, value, z, stream);
+        launch_small_t_mma<CH, 6, Order, Publish>(x, qk_weight, value_z_weight, qk_epilogue,
+                                                  value_epilogue, query, value, z, stream);
         break;
     default:
         throw std::invalid_argument("Q4/Q5 projection-epilogue GDN conv requires T=1..3 or 5..6");
@@ -489,21 +511,41 @@ void q4_q5_gdn_input_conv_snapshot_launch(const Tensor& x, const Weight& qk_weig
                                           const Tensor& snapshot_base_slot, Tensor& query,
                                           Tensor& key, Tensor& value, Tensor& z,
                                           cudaStream_t stream) {
+    if (x.ne[0] == 4096) {
+        if (x.ne[1] == 2) {
+            launch_conv<4096, PdlOrder::Q4ThenQ5>(
+                x, qk_weight, value_z_weight, conv_weight, conv_states, valid_columns, initial_slot,
+                query, key, value, z,
+                SnapshotHistoryPublish{static_cast<__nv_bfloat16*>(conv_states.data),
+                                       static_cast<const std::int32_t*>(snapshot_base_slot.data),
+                                       ConvGeom<4096>::kChannels},
+                stream);
+        } else {
+            launch_conv<4096, PdlOrder::Q5ThenQ4>(
+                x, qk_weight, value_z_weight, conv_weight, conv_states, valid_columns, initial_slot,
+                query, key, value, z,
+                SnapshotHistoryPublish{static_cast<__nv_bfloat16*>(conv_states.data),
+                                       static_cast<const std::int32_t*>(snapshot_base_slot.data),
+                                       ConvGeom<4096>::kChannels},
+                stream);
+        }
+        return;
+    }
     if (x.ne[1] == 2) {
-        launch_conv<PdlOrder::Q4ThenQ5>(
+        launch_conv<5120, PdlOrder::Q4ThenQ5>(
             x, qk_weight, value_z_weight, conv_weight, conv_states, valid_columns, initial_slot,
             query, key, value, z,
             SnapshotHistoryPublish{static_cast<__nv_bfloat16*>(conv_states.data),
                                    static_cast<const std::int32_t*>(snapshot_base_slot.data),
-                                   kChannels},
+                                   ConvGeom<5120>::kChannels},
             stream);
     } else {
-        launch_conv<PdlOrder::Q5ThenQ4>(
+        launch_conv<5120, PdlOrder::Q5ThenQ4>(
             x, qk_weight, value_z_weight, conv_weight, conv_states, valid_columns, initial_slot,
             query, key, value, z,
             SnapshotHistoryPublish{static_cast<__nv_bfloat16*>(conv_states.data),
                                    static_cast<const std::int32_t*>(snapshot_base_slot.data),
-                                   kChannels},
+                                   ConvGeom<5120>::kChannels},
             stream);
     }
 }
@@ -514,16 +556,32 @@ void q4_q5_gdn_input_conv_record_launch(const Tensor& x, const Weight& qk_weight
                                         const Tensor& initial_slot, Tensor& conv_record,
                                         Tensor& query, Tensor& key, Tensor& value, Tensor& z,
                                         cudaStream_t stream) {
-    const RecordColumnPublish publish{static_cast<__nv_bfloat16*>(conv_record.data), kChannels,
-                                      x.ne[1]};
+    const auto publish_for = [&](auto channels) {
+        return RecordColumnPublish{static_cast<__nv_bfloat16*>(conv_record.data), channels,
+                                   x.ne[1]};
+    };
+    if (x.ne[0] == 4096) {
+        const auto publish = publish_for(ConvGeom<4096>::kChannels);
+        if (x.ne[1] == 2) {
+            launch_conv<4096, PdlOrder::Q4ThenQ5>(x, qk_weight, value_z_weight, conv_weight,
+                                                  conv_states, valid_columns, initial_slot, query,
+                                                  key, value, z, publish, stream);
+        } else {
+            launch_conv<4096, PdlOrder::Q5ThenQ4>(x, qk_weight, value_z_weight, conv_weight,
+                                                  conv_states, valid_columns, initial_slot, query,
+                                                  key, value, z, publish, stream);
+        }
+        return;
+    }
+    const auto publish = publish_for(ConvGeom<5120>::kChannels);
     if (x.ne[1] == 2) {
-        launch_conv<PdlOrder::Q4ThenQ5>(x, qk_weight, value_z_weight, conv_weight, conv_states,
-                                        valid_columns, initial_slot, query, key, value, z, publish,
-                                        stream);
+        launch_conv<5120, PdlOrder::Q4ThenQ5>(x, qk_weight, value_z_weight, conv_weight,
+                                              conv_states, valid_columns, initial_slot, query, key,
+                                              value, z, publish, stream);
     } else {
-        launch_conv<PdlOrder::Q5ThenQ4>(x, qk_weight, value_z_weight, conv_weight, conv_states,
-                                        valid_columns, initial_slot, query, key, value, z, publish,
-                                        stream);
+        launch_conv<5120, PdlOrder::Q5ThenQ4>(x, qk_weight, value_z_weight, conv_weight,
+                                              conv_states, valid_columns, initial_slot, query, key,
+                                              value, z, publish, stream);
     }
 }
 
