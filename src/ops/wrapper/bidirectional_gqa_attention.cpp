@@ -1,3 +1,4 @@
+#include "ninfer/types.h"
 #include "ninfer/ops/bidirectional_gqa_attention.h"
 
 #include "core/layout.h"
@@ -92,7 +93,7 @@ std::size_t bidirectional_gqa_attention_workspace_capacity_bytes(
     GqaContextExecutionEnvelope envelope, std::int32_t min_tokens, std::int32_t max_tokens,
     std::int32_t batch_size) {
     if (min_tokens < 1 || max_tokens < min_tokens || max_tokens > 16 || batch_size < 1 ||
-        batch_size > 8 || envelope.min_context > envelope.max_context ||
+        batch_size > static_cast<std::int32_t>(kMaximumLanes) || envelope.min_context > envelope.max_context ||
         envelope.max_context >
             static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
         throw std::invalid_argument(
@@ -132,7 +133,7 @@ void bidirectional_gqa_attention(const Tensor& q, const Tensor& query_k, const T
     if (tokens < 1 || tokens > 16) {
         throw std::invalid_argument("bidirectional_gqa_attention: optimized domain is T=1..16");
     }
-    if (batch < 1 || batch > 8) {
+    if (batch < 1 || batch > static_cast<std::int32_t>(kMaximumLanes)) {
         throw std::invalid_argument("bidirectional_gqa_attention: B must be 1..8");
     }
     require_shape(q, kHeadDim, kQHeads, tokens, batch, op, "q");
