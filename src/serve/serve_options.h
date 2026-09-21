@@ -46,6 +46,7 @@ struct ServeOptions {
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
     ContextCacheOptions context_cache;
+    std::uint32_t auto_long_anchors = 0; // PrivateLongAnchor markers at last-N message boundaries per request
     bool enable_vision      = false;
     bool use_cuda_graph     = true;
     bool allow_prefix_reuse = true;

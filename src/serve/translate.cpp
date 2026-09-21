@@ -196,7 +196,8 @@ ResolvedPromptSemantics resolve_prompt_semantics(const GenerationRequest& reques
 
 ninfer::PromptInput to_prompt_input(const GenerationRequest& request,
                                     const ResolvedPromptSemantics& semantics,
-                                    const MediaAcquirer& acquire_media) {
+                                    const MediaAcquirer& acquire_media,
+                                    const ninfer::ContextCacheHints& context_cache) {
     ninfer::PromptInput input;
     input.messages.reserve(request.messages.size());
     for (std::size_t turn_index = 0; turn_index < request.messages.size(); ++turn_index) {
@@ -290,6 +291,44 @@ ninfer::PromptInput to_prompt_input(const GenerationRequest& request,
     input.options.preserve_thinking                = semantics.preserve_thinking;
     input.options.chat_template_kwargs_json        = semantics.chat_template_kwargs_json;
     input.options.add_vision_id                    = false;
+    // Auto long anchors: OpenAI-protocol clients cannot express PrivateLongAnchor
+    // markers, so multi-turn agent sessions re-prefill from token zero whenever the
+    // prefix mutates. Place PrivateLongAnchor markers at each of the last N message
+    // boundaries (N = auto-long-anchors, 0 disables) so a mutated tail reuses the
+    // longest surviving anchor instead of the full context. Frontiers at turn
+    // boundaries are stable under appends and shallow rewrites, which covers the
+    // vast majority of agent-loop traffic.
+    {
+        const std::uint32_t auto_anchors = context_cache.auto_long_anchors;
+        const std::size_t   total_turns  = input.messages.size();
+        std::uint32_t       placed       = 0;
+        for (std::size_t turn = total_turns;
+             turn > 0 && placed < auto_anchors; --turn) {
+            const std::uint32_t after_count = static_cast<std::uint32_t>(turn);
+            if (after_count == total_turns) {
+                // boundary after the final message is the response point; useless as anchor
+                continue;
+            }
+            // skip boundaries that already carry a protocol marker
+            bool occupied = false;
+            for (const ninfer::PromptCacheMarker& marker : input.context_cache.markers) {
+                if (marker.location == ninfer::PromptCacheMarkerLocation::MessageBoundary &&
+                    marker.after_message_count == after_count) {
+                    occupied = true;
+                    break;
+                }
+            }
+            if (occupied) {
+                continue;
+            }
+            input.context_cache.markers.push_back(ninfer::PromptCacheMarker{
+                .after_message_count = after_count,
+                .kind                = ninfer::PromptCacheMarkerKind::PrivateLongAnchor,
+                .location            = ninfer::PromptCacheMarkerLocation::MessageBoundary,
+            });
+            ++placed;
+        }
+    }
     const std::vector<const ToolDefinition*> tools = effective_tools(request);
     input.options.tool_jsons.reserve(tools.size());
     for (std::size_t index = 0; index < tools.size(); ++index) {

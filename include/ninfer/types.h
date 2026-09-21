@@ -483,6 +483,9 @@ struct ContextCacheHints {
     // Advance the named session lineage when session_key is present. This does not require an
     // anonymous content-matched source to be retained.
     bool update_session_index = true;
+    // Place PrivateLongAnchor markers at each of the last N message boundaries of the rendered
+    // prompt. Zero disables. Lets OpenAI-protocol clients retain deep-prefix reuse across turns.
+    std::uint32_t auto_long_anchors = 0;
 };
 
 struct PromptInput {

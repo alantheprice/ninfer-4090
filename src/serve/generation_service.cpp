@@ -299,6 +299,7 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
                                                 ContextCacheHints context_cache,
                                                 CacheParticipation cache_participation,
                                                 DeadlinePolicy deadline_policy) const {
+    // auto long anchors are stamped in translate; wired via request.auto_long_anchors below
     PreparedRequest prepared;
     const ResolvedPromptSemantics semantics = resolve_prompt_semantics(request, options_);
     ninfer::RequestOptions request_options  = to_request_options(
@@ -321,7 +322,7 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
             to_prompt_input(request, semantics, [&](const ContentPart& part) {
                 return acquire_media(part, prepared.lifetime->deadline, is_cancelled,
                                      remaining_media_bytes);
-            });
+            }, context_cache);
         std::vector<PromptCacheMarker> protocol_markers = std::move(input.context_cache.markers);
         const bool protocol_allows_engine_automatic =
             input.context_cache.allow_engine_automatic_shared_prefixes;
@@ -380,7 +381,7 @@ int GenerationService::count_prompt_tokens(const GenerationRequest& request,
         ninfer::PromptInput input =
             to_prompt_input(request, semantics, [&](const ContentPart& part) {
                 return acquire_media(part, deadline, is_cancelled, remaining_media_bytes);
-            });
+            }, ninfer::ContextCacheHints{});
         check_preparation_control(deadline, is_cancelled);
         const PreparationControl control{
             .deadline     = deadline,

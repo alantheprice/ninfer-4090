@@ -27,7 +27,8 @@ ResolvedPromptSemantics resolve_prompt_semantics(const GenerationRequest& req,
 
 ninfer::PromptInput to_prompt_input(const GenerationRequest& req,
                                     const ResolvedPromptSemantics& semantics,
-                                    const MediaAcquirer& acquire_media);
+                                    const MediaAcquirer& acquire_media,
+                                    const ninfer::ContextCacheHints& context_cache = {});
 
 // Build public request options (output budget, thinking, stop policy, sampler). The
 // sampler is resolved from the request's SamplingParams over the server defaults;

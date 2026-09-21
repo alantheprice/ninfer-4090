@@ -38,7 +38,7 @@ KNOWN_COUNTS = {
     ("qwen3.6-27b", "groupwise-int"): (1124,),
     ("qwen3.6-27b", "nvfp4"): (1307,),
     ("qwen3.8-27b", "groupwise-int"): (1124, 1190),
-    ("qwen3.8-27b", "nvfp4"): (1124, 1190),
+    ("qwen3.8-27b", "nvfp4"): (1124, 1190, 1307),
     ("qwen3.6-35b-a3b", "groupwise-int"): (940,),
 }
 LIMIT = 32_000_000_000

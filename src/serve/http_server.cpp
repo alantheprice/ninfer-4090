@@ -431,6 +431,12 @@ void HttpServer::register_routes() {
         res.set_content(nlohmann::json{{"status", available ? "ok" : "unavailable"}}.dump(),
                         "application/json");
     });
+    server_.Get("/metrics", [this](const httplib::Request&, httplib::Response& res) {
+        handle_metrics(res);
+    });
+    server_.Get("/slots", [this](const httplib::Request&, httplib::Response& res) {
+        handle_slots(res);
+    });
     server_.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
         handle_models(req, res);
     });
@@ -496,6 +502,147 @@ void HttpServer::handle_model(const httplib::Request& req, httplib::Response& re
     res.set_content(make_model_object(public_model_id_, unix_time_now(), options_.max_context),
                     "application/json");
 }
+
+void HttpServer::handle_metrics(httplib::Response& res) const {
+    using Clock  = std::chrono::steady_clock;
+    static const Clock::time_point process_start = Clock::now();
+    struct CounterDef {
+        const char* name;
+        const char* help;
+        std::uint64_t value;
+    };
+    std::string out;
+    auto emit_u64 = [&](const char* name, const char* help, std::uint64_t value,
+                        const char* labels = "") {
+        out += std::string("# HELP ") + name + ' ' + help + "\n# TYPE " + name + " counter\n" +
+               name + labels + ' ' + std::to_string(value) + "\n";
+    };
+    auto emit_gauge = [&](const char* name, const char* help, std::uint64_t value) {
+        out += std::string("# HELP ") + name + ' ' + help + "\n# TYPE " + name + " gauge\n" +
+               name + ' ' + std::to_string(value) + "\n";
+    };
+    auto emit_dbl = [&](const char* name, const char* help, double value) {
+        out += std::string("# HELP ") + name + ' ' + help + "\n# TYPE " + name + " gauge\n" +
+               name + ' ' + std::to_string(value) + "\n";
+    };
+
+    if (service_ == nullptr) {
+        res.status = 503;
+        res.set_content(out, "text/plain; version=0.0.4");
+        return;
+    }
+    const ninfer::RuntimeStats stats = service_->runtime_stats();
+    const ninfer::LoadSummary load   = service_->load_summary();
+
+    emit_u64("llamacpp:prompt_tokens_total",
+             "Total prompt tokens computed by prefill (cache hits excluded).",
+             stats.computed_prefill_tokens);
+    emit_u64("llamacpp:prompt_seconds_total", "Total wall seconds spent computing prefill.",
+             0);
+    emit_u64("llamacpp:tokens_predicted_total",
+             "Total output tokens committed by decode.", stats.committed_decode_tokens);
+    emit_u64("llamacpp:tokens_predicted_seconds_total",
+             "Total wall seconds spent decoding.", 0);
+    emit_gauge("llamacpp:requests_processing", "Requests currently running or prefilling.",
+               static_cast<std::uint64_t>(stats.running_requests));
+    emit_gauge("llamacpp:requests_deferred", "Requests waiting in the admission queue.",
+               static_cast<std::uint64_t>(stats.waiting_requests));
+    emit_gauge("llamacpp:prompt_cache_tokens_total",
+               "Prompt tokens served from checkpoint reuse (all reuse paths).",
+               stats.reused_prompt_tokens);
+
+    emit_u64("ninfer:requests_total", "Total generation requests admitted.",
+             stats.root_selections + stats.private_endpoint_selections +
+                 stats.private_turn_closure_selections +
+                 stats.private_response_replay_selections +
+                 stats.private_long_anchor_selections +
+                 stats.shared_stable_prefix_selections);
+    emit_u64("ninfer:decode_rounds_total", "Decode batch executions.", stats.decode_rounds);
+    emit_u64("ninfer:decode_row_rounds_total",
+             "Sum of per-row decode executions across batches.", stats.decode_row_rounds);
+    emit_u64("ninfer:prefill_units_total", "Prefill compact-batch units executed.",
+             stats.host_work.prefill_units);
+    emit_u64("ninfer:prompt_cache_root_selections_total",
+             "Requests whose reuse candidate was the shared root (cold prefill).",
+             stats.root_selections);
+    emit_u64("ninfer:prompt_cache_private_endpoint_selections_total",
+             "Requests restored from their session endpoint (pure appends).",
+             stats.private_endpoint_selections);
+    emit_u64("ninfer:prompt_cache_turn_closure_selections_total",
+             "Requests restored from a turn-closure checkpoint.",
+             stats.private_turn_closure_selections);
+    emit_u64("ninfer:prompt_cache_response_replay_selections_total",
+             "Requests restored by response replay.", stats.private_response_replay_selections);
+    emit_u64("ninfer:prompt_cache_long_anchor_selections_total",
+             "Requests restored from a private long anchor (history rewrite).",
+             stats.private_long_anchor_selections);
+    emit_u64("ninfer:prompt_cache_shared_prefix_selections_total",
+             "Requests reading a published shared prefix.",
+             stats.shared_stable_prefix_selections);
+    emit_gauge("ninfer:prefilling_requests", "Requests currently computing prefill.",
+               stats.prefilling_requests);
+    emit_gauge("ninfer:decode_ready_requests", "Requests holding a decode lane.",
+               stats.decode_ready_requests);
+    emit_gauge("ninfer:materializing_requests", "Requests restoring checkpoints.",
+               stats.materializing_requests);
+    emit_gauge("ninfer:capture_pending_requests", "Requests waiting on checkpoint capture.",
+               stats.capture_pending_requests);
+    emit_gauge("ninfer:device_state_occupied_slots", "Occupied device state slots.",
+               stats.device_state_occupied_slots);
+    emit_gauge("ninfer:host_state_occupied_slots", "Occupied host state slots.",
+               stats.host_state_occupied_slots);
+    emit_gauge("ninfer:device_main_kv_occupied_pages", "Occupied main KV pages on device.",
+               stats.device_main_kv_occupied_pages);
+    emit_u64("ninfer:active_captures_completed_total",
+             "Checkpoint captures completed.", stats.active_captures_completed);
+    emit_u64("ninfer:active_captures_aborted_total",
+             "Checkpoint captures aborted.", stats.active_captures_aborted);
+    emit_u64("ninfer:pressure_spill_pages_total", "KV pages spilled under pressure.",
+             stats.pressure_spill_pages);
+    emit_u64("ninfer:pressure_private_owners_evicted_total",
+             "Private continuations evicted under pressure.",
+             stats.pressure_private_owners_evicted);
+    emit_dbl("ninfer:process_uptime_seconds", "Seconds since the stats endpoint was initialized.",
+             std::chrono::duration<double>(Clock::now() - process_start).count());
+
+    res.set_header("Cache-Control", "no-store");
+    res.set_content(out, "text/plain; version=0.0.4");
+}
+
+void HttpServer::handle_slots(httplib::Response& res) const {
+    if (service_ == nullptr) {
+        res.status = 503;
+        res.set_content(R"({"error":"service not attached"})", "application/json");
+        return;
+    }
+    const ninfer::RuntimeStats stats = service_->runtime_stats();
+    const std::uint32_t max_lanes    = service_->engine_options().max_concurrency;
+    nlohmann::json j                 = nlohmann::json::array();
+    for (std::uint32_t lane = 0; lane < max_lanes; ++lane) {
+        j.push_back(nlohmann::json{
+            {"id", lane},
+            {"busy", lane < stats.running_requests},
+        });
+    }
+    nlohmann::json out{
+        {"model", public_model_id_},
+        {"max_concurrency", max_lanes},
+        {"requests_processing", stats.running_requests},
+        {"requests_waiting", stats.waiting_requests},
+        {"prefilling", stats.prefilling_requests},
+        {"decode_ready", stats.decode_ready_requests},
+        {"materializing", stats.materializing_requests},
+        {"device_state_slots", {{"occupied", stats.device_state_occupied_slots}}},
+        {"host_state_slots", {{"occupied", stats.host_state_occupied_slots}}},
+        {"kv_pages",
+         {{"main_occupied", stats.device_main_kv_occupied_pages},
+          {"backend_occupied", stats.device_backend_kv_occupied_pages}}},
+        {"slots", std::move(j)},
+    };
+    res.set_content(out.dump(), "application/json");
+}
+
+
 
 bool HttpServer::bind() { return server_.bind_to_port(options_.host, options_.port); }
 

@@ -75,7 +75,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--media-preprocess-threads N] "
            "[--device-state-slots N] [--host-state-slots N] [--host-kv-mib N] "
            "[--max-private-continuations N] [--max-shared-prefixes N] "
-           "[--max-long-anchors-per-continuation N] "
+           "[--max-long-anchors-per-continuation N] [--auto-long-anchors N] "
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
@@ -234,6 +234,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 static_cast<std::uint32_t>(parse_nonnegative_int(
                     require_value("--max-shared-prefixes"), "max-shared-prefixes"));
             context_capacity_explicit = true;
+        } else if (arg == "--auto-long-anchors") {
+            options.auto_long_anchors = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--auto-long-anchors"), "auto-long-anchors"));
         } else if (arg == "--max-long-anchors-per-continuation") {
             options.context_cache.max_long_anchors_per_continuation = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--max-long-anchors-per-continuation"),
