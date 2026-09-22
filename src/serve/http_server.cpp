@@ -437,6 +437,9 @@ void HttpServer::register_routes() {
     server_.Get("/slots", [this](const httplib::Request&, httplib::Response& res) {
         handle_slots(res);
     });
+    server_.Get("/usage", [this](const httplib::Request&, httplib::Response& res) {
+        handle_usage(res);
+    });
     server_.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
         handle_models(req, res);
     });
@@ -640,6 +643,92 @@ void HttpServer::handle_slots(httplib::Response& res) const {
         {"slots", std::move(j)},
     };
     res.set_content(out.dump(), "application/json");
+}
+
+void HttpServer::handle_usage(httplib::Response& res) const {
+    using Clock  = std::chrono::steady_clock;
+    static const Clock::time_point process_start = Clock::now();
+    if (service_ == nullptr) {
+        res.status = 503;
+        res.set_content(R"({"error":"service not attached"})", "application/json");
+        return;
+    }
+    const ninfer::RuntimeStats stats = service_->runtime_stats();
+    const double uptime_s =
+        std::chrono::duration<double>(Clock::now() - process_start).count();
+
+    const std::uint64_t total_prompt = stats.computed_prefill_tokens +
+                                       stats.reused_prompt_tokens;
+    const std::uint64_t cache_hits   = stats.reused_prompt_tokens;
+    const double hit_rate = total_prompt ? 100.0 * cache_hits / total_prompt : 0.0;
+    const double cache_efficiency =
+        (stats.root_selections + stats.private_endpoint_selections +
+         stats.private_turn_closure_selections + stats.private_response_replay_selections +
+         stats.private_long_anchor_selections + stats.shared_stable_prefix_selections) != 0
+            ? 100.0 * (stats.private_endpoint_selections +
+                       stats.private_turn_closure_selections +
+                       stats.private_response_replay_selections +
+                       stats.private_long_anchor_selections +
+                       stats.shared_stable_prefix_selections) /
+                  (stats.root_selections + stats.private_endpoint_selections +
+                   stats.private_turn_closure_selections +
+                   stats.private_response_replay_selections +
+                   stats.private_long_anchor_selections +
+                   stats.shared_stable_prefix_selections)
+            : 0.0;
+    // Lifetime-average rates: cumulative tokens over server uptime (stable, monotonic).
+    const double prefill_tps = uptime_s > 0.0
+                                   ? static_cast<double>(stats.computed_prefill_tokens) / uptime_s
+                                   : 0.0;
+    const double decode_tps = uptime_s > 0.0
+                                  ? static_cast<double>(stats.committed_decode_tokens) / uptime_s
+                                  : 0.0;
+    const int hours   = static_cast<int>(uptime_s / 3600);
+    const int minutes = static_cast<int>(uptime_s / 60) % 60;
+
+    nlohmann::json out{
+        {"model", public_model_id_},
+        {"uptime", {{"seconds", uptime_s},
+                    {"human", std::to_string(hours) + "h " + std::to_string(minutes) + "m"}}},
+        {"tokens",
+         {{"input",
+           {{"total", total_prompt},
+            {"cache_hits", cache_hits},
+            {"cache_computed", stats.computed_prefill_tokens},
+            {"cache_hit_rate_pct", hit_rate}}},
+          {"output", {{"total", stats.committed_decode_tokens}}},
+          {"total", total_prompt + stats.committed_decode_tokens}}},
+        {"throughput",
+         {{"prefill_tok_per_s", prefill_tps}, {"decode_tok_per_s", decode_tps}}},
+        {"requests",
+         {{"total", stats.root_selections + stats.private_endpoint_selections +
+                        stats.private_turn_closure_selections +
+                        stats.private_response_replay_selections +
+                        stats.private_long_anchor_selections +
+                        stats.shared_stable_prefix_selections},
+          {"cache_miss_cold_starts", stats.root_selections},
+          {"cache_hit_endpoint", stats.private_endpoint_selections},
+          {"cache_hit_turn_closure", stats.private_turn_closure_selections},
+          {"cache_hit_response_replay", stats.private_response_replay_selections},
+          {"cache_hit_long_anchor", stats.private_long_anchor_selections},
+          {"cache_hit_shared_prefix", stats.shared_stable_prefix_selections},
+          {"cache_efficiency_pct", cache_efficiency}}},
+        {"lanes",
+         {{"capacity", service_->engine_options().max_concurrency},
+          {"processing", stats.running_requests},
+          {"waiting", stats.waiting_requests},
+          {"decoding", stats.decode_ready_requests},
+          {"prefilling", stats.prefilling_requests},
+          {"restoring_checkpoints", stats.materializing_requests}}},
+        {"health",
+         {{"checkpoint_captures_completed", stats.active_captures_completed},
+          {"checkpoint_captures_aborted", stats.active_captures_aborted},
+          {"kv_pressure_spills", stats.pressure_spill_pages},
+          {"sessions_evicted", stats.pressure_private_owners_evicted},
+          {"kv_pages_occupied", stats.device_main_kv_occupied_pages}}},
+    };
+    res.set_header("Cache-Control", "no-store");
+    res.set_content(out.dump(2), "application/json");
 }
 
 

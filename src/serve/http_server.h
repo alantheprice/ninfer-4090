@@ -89,6 +89,7 @@ private:
     void handle_model(const httplib::Request& req, httplib::Response& res) const;
     void handle_metrics(httplib::Response& res) const;
     void handle_slots(httplib::Response& res) const;
+    void handle_usage(httplib::Response& res) const;
 
     void record_request_start(const RequestLogContext& context);
     void record_request_rejected(const RequestRejectionLogContext& context);
