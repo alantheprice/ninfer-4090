@@ -7,7 +7,11 @@
 
 #include <nlohmann/json.hpp>
 
+#include <dlfcn.h>
+
 #include <chrono>
+#include <cstdio>
+#include <ctime>
 #include <exception>
 #include <mutex>
 #include <stdexcept>
@@ -17,6 +21,57 @@
 
 namespace ninfer::serve {
 namespace {
+
+// NVML dynamic loading for GPU power sampling. Loaded once; sampling is a no-op
+// returning 0 if the library or device is unavailable (energy accounting then
+// reports unavailable rather than wrong numbers).
+struct GpuPowerSampler {
+    // nvmlDeviceGetPowerUsage(nvmlDevice_t, unsigned int*) — milliwatts.
+    using PowerFn = int (*)(void*, unsigned int*);
+    // nvmlDeviceGetHandleByIndex_v2(unsigned int index, nvmlDevice_t*) — note arg order.
+    using HandleFn = int (*)(unsigned int, void*);
+    PowerFn query_power = nullptr;
+    HandleFn handle_fn  = nullptr;
+    void* nvml_handle = nullptr;
+    void* device = nullptr;
+    bool initialized = false;
+
+    GpuPowerSampler() {
+        nvml_handle = dlopen("libnvidia-ml.so.1", RTLD_LAZY);
+        if (nvml_handle == nullptr) {
+            std::fprintf(stderr, "[nvml] dlopen failed\n");
+            return;
+        }
+        auto init_fn     = (int (*)())dlsym(nvml_handle, "nvmlInit_v2");
+        handle_fn        = (HandleFn)dlsym(nvml_handle, "nvmlDeviceGetHandleByIndex_v2");
+        query_power      = (PowerFn)dlsym(nvml_handle, "nvmlDeviceGetPowerUsage");
+        if (init_fn == nullptr || handle_fn == nullptr || query_power == nullptr) {
+            std::fprintf(stderr, "[nvml] symbol lookup failed\n");
+            return;
+        }
+        if (init_fn() != 0) {
+            std::fprintf(stderr, "[nvml] init failed\n");
+            return;
+        }
+        // Prefer the CUDA device order match is unavailable at this layer; probe 0..3.
+        int rc = 1;
+        for (unsigned int idx = 0; idx < 4 && rc != 0; ++idx) {
+            rc = handle_fn(idx, &device);
+        }
+        if (rc != 0) {
+            std::fprintf(stderr, "[nvml] no device handle (rc=%d)\n", rc);
+            return;
+        }
+        initialized = true;
+    }
+    ~GpuPowerSampler() = default;
+    void sample() {
+        if (!initialized) { return; }
+        unsigned int mw = 0;
+        if (query_power(device, &mw) == 0) { last_milliwatts = mw; }
+    }
+    unsigned int last_milliwatts = 0;
+};
 
 void write_exception(httplib::Response& res, const std::exception& ex) {
     ApiError error;
@@ -289,6 +344,94 @@ void HttpServer::record_throughput(const ThroughputReport& report) {
         last_throughput_        = report;
         last_throughput_at_     = std::chrono::steady_clock::now();
     }
+    // Lifetime token counters (survive restarts via persisted baseline).
+    persisted_output_tokens += report.committed_decode_tokens;
+    persisted_prompt_tokens += report.computed_prefill_tokens;
+    persisted_cached_tokens +=
+        report.current.reused_prompt_tokens - report.previous.reused_prompt_tokens;
+}
+
+void HttpServer::persist_metrics_state() {
+    const std::string path = !options_.metrics_state_path.empty()
+                                 ? options_.metrics_state_path
+                                 : (!options_.request_log_jsonl.empty()
+                                        ? options_.request_log_jsonl + ".metrics-state.json"
+                                        : std::string());
+    if (path.empty()) { return; }
+    std::lock_guard lock(energy_mutex_);
+    nlohmann::json j{
+        {"schema", 1},
+        {"daily_ws", energy.daily_ws},
+        {"persisted_prompt_tokens", persisted_prompt_tokens},
+        {"persisted_cached_tokens", persisted_cached_tokens},
+        {"persisted_output_tokens", persisted_output_tokens},
+    };
+    const std::string tmp = path + ".tmp";
+    if (FILE* f = fopen(tmp.c_str(), "w")) {
+        fputs(j.dump().c_str(), f);
+        fclose(f);
+        rename(tmp.c_str(), path.c_str());
+    }
+}
+
+void HttpServer::restore_metrics_state() {
+    const std::string path = !options_.metrics_state_path.empty()
+                                 ? options_.metrics_state_path
+                                 : (!options_.request_log_jsonl.empty()
+                                        ? options_.request_log_jsonl + ".metrics-state.json"
+                                        : std::string());
+    if (path.empty()) { return; }
+    FILE* f = fopen(path.c_str(), "r");
+    if (f == nullptr) { return; }
+    std::string buf;
+    char chunk[8192];
+    std::size_t n = 0;
+    while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0) { buf.append(chunk, n); }
+    fclose(f);
+    try {
+        const auto j = nlohmann::json::parse(buf);
+        {
+            std::lock_guard lock(energy_mutex_);
+            for (auto it = j["daily_ws"].begin(); it != j["daily_ws"].end(); ++it) {
+                energy.daily_ws[it.key()] = it.value().get<double>();
+            }
+            persisted_prompt_tokens = j.value("persisted_prompt_tokens", 0ULL);
+            persisted_cached_tokens = j.value("persisted_cached_tokens", 0ULL);
+            persisted_output_tokens = j.value("persisted_output_tokens", 0ULL);
+        }
+        std::fprintf(stderr, "[metrics] state restored from %s\n", path.c_str());
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[metrics] state restore failed: %s\n", e.what());
+    }
+}
+
+void HttpServer::record_energy(double tokens, double interval_s, double avg_watts) {
+    if (interval_s <= 0.0) { return; }
+
+    const std::chrono::time_point now_utc =
+        std::chrono::time_point_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now());
+    const std::time_t tt = std::chrono::system_clock::to_time_t(now_utc);
+    std::tm utc{};
+    gmtime_r(&tt, &utc);
+    char day_key[16];
+    std::snprintf(day_key, sizeof(day_key), "%04d-%02d-%02d", utc.tm_year + 1900,
+                  utc.tm_mon + 1, utc.tm_mday);
+    const double ws = avg_watts * interval_s;
+    std::lock_guard lock(energy_mutex_);
+    energy.daily_ws[day_key] += ws;
+    // rolling 30-day = sum of retained daily buckets (prune older than 31 days)
+    static constexpr int kRetainDays = 31;
+    if (energy.daily_ws.size() > static_cast<std::size_t>(kRetainDays)) {
+        for (auto it = energy.daily_ws.begin();
+             it != energy.daily_ws.end() &&
+             static_cast<int>(energy.daily_ws.size()) > kRetainDays;) {
+            it = energy.daily_ws.erase(it);
+        }
+    }
+    double month = 0.0;
+    for (const auto& [key, ws_val] : energy.daily_ws) { month += ws_val; }
+    energy.month_ws = month;
 }
 
 void HttpServer::run_stats_reporter() {
@@ -297,6 +440,12 @@ void HttpServer::run_stats_reporter() {
     Clock::time_point previous_time = Clock::now();
     const auto interval             = std::chrono::milliseconds(options_.log_stats_interval_ms);
     Clock::time_point next_deadline = previous_time + interval;
+    GpuPowerSampler power_sampler;
+    double window_watt_seconds = 0.0;
+    double window_seconds_sum  = 0.0;
+    int    window_samples      = 0;
+    long   reporter_ticks      = 0;
+    auto    window_started     = Clock::now();
 
     for (;;) {
         {
@@ -305,12 +454,28 @@ void HttpServer::run_stats_reporter() {
                 break;
             }
         }
+        // sub-sample power twice per window (start and end); trapezoid over the pair
+        power_sampler.sample();
+        const unsigned int mw_start = power_sampler.last_milliwatts;
 
         const ninfer::RuntimeStats current = service_->runtime_stats();
         const Clock::time_point now        = Clock::now();
+        power_sampler.sample();
+        const unsigned int mw_end = power_sampler.last_milliwatts;
+        const double window_s     = std::chrono::duration<double>(now - window_started).count();
+        window_seconds_sum += window_s;
+        window_watt_seconds += ((mw_start + mw_end) / 2.0 / 1000.0) * window_s;
+        ++window_samples;
+        window_started = now;
         const ThroughputReport report      = make_throughput_report(
             previous, current, std::chrono::duration<double>(now - previous_time).count());
         if (report_has_activity(report)) { record_throughput(report); }
+        const double window_avg_watts =
+            window_seconds_sum > 0.0 ? window_watt_seconds / window_seconds_sum : 0.0;
+        record_energy(static_cast<double>(report.computed_prefill_tokens +
+                                          report.committed_decode_tokens),
+                      window_s, window_avg_watts);
+        if (++reporter_ticks % 12 == 0) { persist_metrics_state(); }
         previous      = current;
         previous_time = now;
         next_deadline += interval;
@@ -335,6 +500,7 @@ void HttpServer::stop_stats_reporter() {
     }
     stats_cv_.notify_one();
     stats_thread_.join();
+    persist_metrics_state();
 }
 
 void HttpServer::register_routes() {
@@ -729,18 +895,27 @@ void HttpServer::handle_usage(httplib::Response& res) const {
     const int hours   = static_cast<int>(uptime_s / 3600);
     const int minutes = static_cast<int>(uptime_s / 60) % 60;
 
+    std::uint64_t pt_total = total_prompt;
+    std::uint64_t pt_cache = cache_hits;
+    std::uint64_t pt_out   = stats.committed_decode_tokens;
+    {
+        std::lock_guard lock(energy_mutex_);
+        pt_total += persisted_prompt_tokens + persisted_cached_tokens;
+        pt_cache += persisted_cached_tokens;
+        pt_out   += persisted_output_tokens;
+    }
     nlohmann::json out{
         {"model", public_model_id_},
         {"uptime", {{"seconds", uptime_s},
                     {"human", std::to_string(hours) + "h " + std::to_string(minutes) + "m"}}},
         {"tokens",
          {{"input",
-           {{"total", total_prompt},
-            {"cache_hits", cache_hits},
+           {{"total", pt_total},
+            {"cache_hits", pt_cache},
             {"cache_computed", stats.computed_prefill_tokens},
-            {"cache_hit_rate_pct", hit_rate}}},
-          {"output", {{"total", stats.committed_decode_tokens}}},
-          {"total", total_prompt + stats.committed_decode_tokens}}},
+            {"cache_hit_rate_pct", total_prompt ? 100.0 * pt_cache / pt_total : 0.0}}},
+          {"output", {{"total", pt_out}}},
+          {"total", pt_total + pt_out}}},
         {"throughput",
          {{"window_seconds", window_seconds},
           {"window_active", window_active},
@@ -775,6 +950,51 @@ void HttpServer::handle_usage(httplib::Response& res) const {
           {"sessions_evicted", stats.pressure_private_owners_evicted},
           {"kv_pages_occupied", stats.device_main_kv_occupied_pages}}},
     };
+    // Energy accounting: daily buckets (UTC) + rolling 30-day, cost at the
+    // configured electricity rate. Watt-seconds integrate power sampled by the
+    // stats reporter.
+    {
+        std::lock_guard lock(energy_mutex_);
+        const double rate = options_.electricity_rate_usd_per_kwh;
+        nlohmann::json days = nlohmann::json::object();
+        double daily_ws = 0.0;
+        for (const auto& [key, ws] : energy.daily_ws) {
+            days[key] = {
+                {"wh", ws / 3600.0},
+                {"kwh", ws / 3.6e6},
+                {"cost_usd", ws / 3.6e6 * rate},
+            };
+            daily_ws = ws; // keep last for today bucket
+        }
+        std::string today_key;
+        {
+            std::time_t tt = std::chrono::system_clock::to_time_t(
+                std::chrono::system_clock::now());
+            std::tm utc{};
+            gmtime_r(&tt, &utc);
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", utc.tm_year + 1900,
+                          utc.tm_mon + 1, utc.tm_mday);
+            today_key = buf;
+        }
+        const double today_ws = energy.daily_ws.count(today_key)
+                                    ? energy.daily_ws.at(today_key)
+                                    : 0.0;
+        const double month_ws = energy.month_ws;
+        out["energy"] = {
+            {"rate_usd_per_kwh", rate},
+            {"today",
+             {{"wh", today_ws / 3600.0},
+              {"kwh", today_ws / 3.6e6},
+              {"cost_usd", today_ws / 3.6e6 * rate}}},
+            {"rolling_30d",
+             {{"wh", month_ws / 3600.0},
+              {"kwh", month_ws / 3.6e6},
+              {"cost_usd", month_ws / 3.6e6 * rate}}},
+            {"daily", std::move(days)},
+            {"note", "GPU power only (device 0). Excludes host CPU/RAM/fans and "
+                     "the second GPU. Sampled via NVML at stats-reporter cadence."}};
+    }
     res.set_header("Cache-Control", "no-store");
     res.set_content(out.dump(2), "application/json");
 }
@@ -793,6 +1013,7 @@ void HttpServer::attach(GenerationService& service) {
     request_jsonl_.write_server_start(options_, service.engine_options(),
                                       service.sampling_defaults(), public_model_id_, load,
                                       service.memory_summary());
+    restore_metrics_state();
 }
 
 bool HttpServer::listen() {

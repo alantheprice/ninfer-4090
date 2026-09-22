@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <mutex>
 #include <memory>
+#include <map>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -90,6 +91,7 @@ private:
     void handle_metrics(httplib::Response& res) const;
     void handle_slots(httplib::Response& res) const;
     void handle_usage(httplib::Response& res) const;
+    void handle_energy(httplib::Response& res) const;
 
     void record_request_start(const RequestLogContext& context);
     void record_request_rejected(const RequestRejectionLogContext& context);
@@ -97,8 +99,19 @@ private:
     void record_request_failure(const RequestLogContext& context, const RequestFailure& failure);
     void record_response_failure(std::uint64_t request_id, const RequestFailure& failure);
     void record_throughput(const ThroughputReport& report);
+    void record_energy(double tokens, double interval_s, double avg_watts);
     void run_stats_reporter();
     void stop_stats_reporter();
+
+    struct EnergyBuckets {
+        // Watt-seconds integrated per calendar bucket (UTC day keys).
+        std::map<std::string, double> daily_ws;
+        // Rolling 30-day total (recomputed from daily buckets).
+        double month_ws = 0.0;
+    };
+
+    void persist_metrics_state();
+    void restore_metrics_state();
 
     GenerationService* service_ = nullptr;
     ServeOptions options_;
@@ -118,6 +131,13 @@ private:
     mutable std::mutex last_throughput_mutex_;
     ThroughputReport last_throughput_;
     std::chrono::steady_clock::time_point last_throughput_at_ = std::chrono::steady_clock::now();
+
+    mutable std::mutex energy_mutex_;
+    EnergyBuckets energy;
+    // Lifetime token counters (this process + persisted baseline from previous runs).
+    std::uint64_t persisted_prompt_tokens = 0;
+    std::uint64_t persisted_cached_tokens = 0;
+    std::uint64_t persisted_output_tokens = 0;
 };
 
 } // namespace ninfer::serve

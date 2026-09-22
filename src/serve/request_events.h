@@ -94,6 +94,7 @@ struct ThroughputReport {
     std::uint64_t committed_decode_tokens = 0;
     std::uint64_t decode_rounds           = 0;
     std::uint64_t decode_row_rounds       = 0;
+    double avg_gpu_watts                  = 0.0; // window-average GPU power draw
     ninfer::RuntimeStats previous;
     ninfer::RuntimeStats current;
 };

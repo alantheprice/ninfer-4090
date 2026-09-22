@@ -28,6 +28,9 @@ struct ServeOptions {
     std::string api_key;                          // empty => no auth
     std::optional<std::string> model_id_override; // unset => artifact metadata.name
     std::string request_log_jsonl;                // empty => structured request logging disabled
+    // Persistent metrics snapshot (JSON): energy buckets + lifetime token counters survive
+    // restarts. Empty => derive from request_log_jsonl's directory, else disabled.
+    std::string metrics_state_path;
     std::uint32_t max_context          = 8192;
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(8192);
     std::uint32_t max_concurrency      = 1;
@@ -54,6 +57,9 @@ struct ServeOptions {
     std::optional<bool> preserve_thinking;
     std::optional<std::uint32_t> default_thinking_budget;
     int default_max_tokens = kDefaultMaxTokens;
+    // Electricity rate used by /usage energy-cost accounting (USD per kWh). Default is a
+    // representative US residential rate; override with --electricity-rate.
+    double electricity_rate_usd_per_kwh = 0.15;
     bool enable_cors       = false; // send permissive CORS headers for browser UIs
     // Process-level explicit overrides layered between registered model/mode defaults and request
     // fields. An omitted seed is replaced per request with a fresh random seed.
