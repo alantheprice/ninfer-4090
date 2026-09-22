@@ -112,6 +112,12 @@ private:
     std::condition_variable stats_cv_;
     std::thread stats_thread_;
     bool stats_stopping_ = false;
+    // Most recent 5s-window throughput (pre-/post- counter delta). Kept fresh by the
+    // stats reporter (options_.log_stats_interval_ms); decayed to zero if the reporter
+    // stalls so consumers never read stale "activity".
+    mutable std::mutex last_throughput_mutex_;
+    ThroughputReport last_throughput_;
+    std::chrono::steady_clock::time_point last_throughput_at_ = std::chrono::steady_clock::now();
 };
 
 } // namespace ninfer::serve

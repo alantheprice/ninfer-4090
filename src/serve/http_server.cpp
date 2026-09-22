@@ -284,6 +284,11 @@ void HttpServer::record_response_failure(std::uint64_t request_id, const Request
 void HttpServer::record_throughput(const ThroughputReport& report) {
     request_jsonl_.write_throughput(report);
     operational_log_.throughput(report);
+    {
+        std::lock_guard lock(last_throughput_mutex_);
+        last_throughput_        = report;
+        last_throughput_at_     = std::chrono::steady_clock::now();
+    }
 }
 
 void HttpServer::run_stats_reporter() {
@@ -536,6 +541,23 @@ void HttpServer::handle_metrics(httplib::Response& res) const {
     }
     const ninfer::RuntimeStats stats = service_->runtime_stats();
     const ninfer::LoadSummary load   = service_->load_summary();
+    // Fresh 5s-window rates from the stats reporter (0 when idle — lifetime averages
+    // over full uptime are meaningless on a bursty server).
+    double window_prefill_tps = 0.0;
+    double window_decode_tps  = 0.0;
+    bool   window_fresh       = false;
+    {
+        std::lock_guard lock(last_throughput_mutex_);
+        const double age_s = std::chrono::duration<double>(
+                                 Clock::now() - last_throughput_at_).count();
+        window_fresh = age_s < 10.0 && last_throughput_.interval_seconds > 0.0;
+        if (window_fresh) {
+            window_prefill_tps = static_cast<double>(last_throughput_.computed_prefill_tokens) /
+                                 last_throughput_.interval_seconds;
+            window_decode_tps = static_cast<double>(last_throughput_.committed_decode_tokens) /
+                                last_throughput_.interval_seconds;
+        }
+    }
 
     emit_u64("llamacpp:prompt_tokens_total",
              "Total prompt tokens computed by prefill (cache hits excluded).",
@@ -548,6 +570,12 @@ void HttpServer::handle_metrics(httplib::Response& res) const {
              "Total wall seconds spent decoding.", 0);
     emit_gauge("llamacpp:requests_processing", "Requests currently running or prefilling.",
                static_cast<std::uint64_t>(stats.running_requests));
+    emit_gauge("llamacpp:prompt_tokens_seconds", "Recent-window prefill throughput (tok/s).",
+               window_prefill_tps);
+    emit_gauge("llamacpp:predicted_tokens_seconds", "Recent-window decode throughput (tok/s).",
+               window_decode_tps);
+    emit_gauge("ninfer:throughput_window_fresh", "1 if the throughput window saw activity.",
+               window_fresh ? 1 : 0);
     emit_gauge("llamacpp:requests_deferred", "Requests waiting in the admission queue.",
                static_cast<std::uint64_t>(stats.waiting_requests));
     emit_gauge("llamacpp:prompt_cache_tokens_total",
@@ -676,13 +704,28 @@ void HttpServer::handle_usage(httplib::Response& res) const {
                    stats.private_long_anchor_selections +
                    stats.shared_stable_prefix_selections)
             : 0.0;
-    // Lifetime-average rates: cumulative tokens over server uptime (stable, monotonic).
-    const double prefill_tps = uptime_s > 0.0
-                                   ? static_cast<double>(stats.computed_prefill_tokens) / uptime_s
-                                   : 0.0;
-    const double decode_tps = uptime_s > 0.0
-                                  ? static_cast<double>(stats.committed_decode_tokens) / uptime_s
-                                  : 0.0;
+    // Lifetime averages over full uptime are meaningless on a bursty server (idle time
+    // dominates). Report the most recent 5s stats-reporter window instead: prefill and
+    // decode tok/s while serving, with an activity flag so consumers can tell idle.
+    double window_prefill_tps = 0.0;
+    double window_decode_tps  = 0.0;
+    std::uint64_t window_prefill_tokens = 0;
+    std::uint64_t window_decode_tokens  = 0;
+    double window_seconds               = 0.0;
+    bool   window_active                = false;
+    {
+        std::lock_guard lock(last_throughput_mutex_);
+        const double age_s = std::chrono::duration<double>(
+                                 Clock::now() - last_throughput_at_).count();
+        window_active        = age_s < 10.0;
+        window_seconds       = last_throughput_.interval_seconds;
+        window_prefill_tokens = last_throughput_.computed_prefill_tokens;
+        window_decode_tokens  = last_throughput_.committed_decode_tokens;
+        if (window_seconds > 0.0 && window_active) {
+            window_prefill_tps = static_cast<double>(window_prefill_tokens) / window_seconds;
+            window_decode_tps  = static_cast<double>(window_decode_tokens) / window_seconds;
+        }
+    }
     const int hours   = static_cast<int>(uptime_s / 3600);
     const int minutes = static_cast<int>(uptime_s / 60) % 60;
 
@@ -699,7 +742,12 @@ void HttpServer::handle_usage(httplib::Response& res) const {
           {"output", {{"total", stats.committed_decode_tokens}}},
           {"total", total_prompt + stats.committed_decode_tokens}}},
         {"throughput",
-         {{"prefill_tok_per_s", prefill_tps}, {"decode_tok_per_s", decode_tps}}},
+         {{"window_seconds", window_seconds},
+          {"window_active", window_active},
+          {"prefill_tok_per_s", window_prefill_tps},
+          {"decode_tok_per_s", window_decode_tps},
+          {"prefill_tokens_last_window", window_prefill_tokens},
+          {"decode_tokens_last_window", window_decode_tokens}}},
         {"requests",
          {{"total", stats.root_selections + stats.private_endpoint_selections +
                         stats.private_turn_closure_selections +
