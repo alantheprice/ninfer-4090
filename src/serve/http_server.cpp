@@ -975,10 +975,11 @@ void HttpServer::handle_usage(httplib::Response& res) const {
             {"kwh", month_ws / 3.6e6},
             {"cost_usd", month_cost}}},
           {"daily", std::move(days)},
-          {"note", "GPU power only (device 0). Excludes host CPU/RAM/fans and the "
-                   "second GPU. Sampled via NVML at stats-reporter cadence. "
-                   "cost_per_m_tokens_usd is blended (input+output combined); cached "
-                   "input dominates agent traffic so it understates per-output cost."}}},
+          {"note", "Measures the NVML device this process runs on (device 0). "
+                   "Excludes host components (CPU, RAM, cooling) and any other "
+                   "GPUs. Sampled via NVML at stats-reporter cadence. "
+                   "cost_per_m_tokens_usd is blended (input+output combined); "
+                   "the true split depends on cache hit rate and output share."}}},
     };
     res.set_header("Cache-Control", "no-store");
     res.set_content(out.dump(2), "application/json");
