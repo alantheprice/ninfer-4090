@@ -420,6 +420,9 @@ void HttpServer::record_energy(double tokens, double interval_s, double avg_watt
     const double ws = avg_watts * interval_s;
     std::lock_guard lock(energy_mutex_);
     energy.daily_ws[day_key] += ws;
+    energy.tokens_total += static_cast<std::uint64_t>(tokens);
+    if (energy.tokens_today_key != day_key) { energy.tokens_today = 0; energy.tokens_today_key = day_key; }
+    energy.tokens_today += static_cast<std::uint64_t>(tokens);
     // rolling 30-day = sum of retained daily buckets (prune older than 31 days)
     static constexpr int kRetainDays = 31;
     if (energy.daily_ws.size() > static_cast<std::size_t>(kRetainDays)) {
@@ -851,59 +854,69 @@ void HttpServer::handle_usage(httplib::Response& res) const {
     const double uptime_s =
         std::chrono::duration<double>(Clock::now() - process_start).count();
 
-    const std::uint64_t total_prompt = stats.computed_prefill_tokens +
-                                       stats.reused_prompt_tokens;
-    const std::uint64_t cache_hits   = stats.reused_prompt_tokens;
-    const double hit_rate = total_prompt ? 100.0 * cache_hits / total_prompt : 0.0;
-    const double cache_efficiency =
-        (stats.root_selections + stats.private_endpoint_selections +
-         stats.private_turn_closure_selections + stats.private_response_replay_selections +
-         stats.private_long_anchor_selections + stats.shared_stable_prefix_selections) != 0
-            ? 100.0 * (stats.private_endpoint_selections +
-                       stats.private_turn_closure_selections +
-                       stats.private_response_replay_selections +
-                       stats.private_long_anchor_selections +
-                       stats.shared_stable_prefix_selections) /
-                  (stats.root_selections + stats.private_endpoint_selections +
-                   stats.private_turn_closure_selections +
-                   stats.private_response_replay_selections +
-                   stats.private_long_anchor_selections +
-                   stats.shared_stable_prefix_selections)
-            : 0.0;
-    // Lifetime averages over full uptime are meaningless on a bursty server (idle time
-    // dominates). Report the most recent 5s stats-reporter window instead: prefill and
-    // decode tok/s while serving, with an activity flag so consumers can tell idle.
-    double window_prefill_tps = 0.0;
-    double window_decode_tps  = 0.0;
-    std::uint64_t window_prefill_tokens = 0;
-    std::uint64_t window_decode_tokens  = 0;
-    double window_seconds               = 0.0;
-    bool   window_active                = false;
+    // Copy everything under short lock scopes; build the response afterwards.
+    std::uint64_t pt_total = 0, pt_cache = 0, pt_out = 0;
+    std::map<std::string, double> daily_ws_copy;
+    double month_ws = 0.0;
+    {
+        std::lock_guard lock(energy_mutex_);
+        pt_total  = persisted_prompt_tokens + persisted_cached_tokens +
+                    stats.computed_prefill_tokens + stats.reused_prompt_tokens;
+        pt_cache  = persisted_cached_tokens + stats.reused_prompt_tokens;
+        pt_out    = persisted_output_tokens + stats.committed_decode_tokens;
+        daily_ws_copy = energy.daily_ws;
+        month_ws  = energy.month_ws;
+    }
+
+    const double hit_rate = pt_total ? 100.0 * pt_cache / pt_total : 0.0;
+    double cache_efficiency = 0.0;
+    {
+        const double denom = static_cast<double>(stats.root_selections +
+            stats.private_endpoint_selections + stats.private_turn_closure_selections +
+            stats.private_response_replay_selections + stats.private_long_anchor_selections +
+            stats.shared_stable_prefix_selections);
+        if (denom > 0) {
+            cache_efficiency = 100.0 * (denom - stats.root_selections) / denom;
+        }
+    }
+
+    // Most recent 5s stats-reporter window.
+    double window_prefill_tps = 0.0, window_decode_tps = 0.0, window_seconds = 0.0;
+    std::uint64_t window_prefill_tokens = 0, window_decode_tokens = 0;
+    bool window_active = false;
     {
         std::lock_guard lock(last_throughput_mutex_);
-        const double age_s = std::chrono::duration<double>(
-                                 Clock::now() - last_throughput_at_).count();
-        window_active        = age_s < 10.0;
         window_seconds       = last_throughput_.interval_seconds;
         window_prefill_tokens = last_throughput_.computed_prefill_tokens;
         window_decode_tokens  = last_throughput_.committed_decode_tokens;
-        if (window_seconds > 0.0 && window_active) {
-            window_prefill_tps = static_cast<double>(window_prefill_tokens) / window_seconds;
-            window_decode_tps  = static_cast<double>(window_decode_tokens) / window_seconds;
+        window_active        = window_seconds > 0.0;
+        if (window_active) {
+            window_prefill_tps = window_prefill_tokens / window_seconds;
+            window_decode_tps  = window_decode_tokens / window_seconds;
         }
     }
+
     const int hours   = static_cast<int>(uptime_s / 3600);
     const int minutes = static_cast<int>(uptime_s / 60) % 60;
 
-    std::uint64_t pt_total = total_prompt;
-    std::uint64_t pt_cache = cache_hits;
-    std::uint64_t pt_out   = stats.committed_decode_tokens;
-    {
-        std::lock_guard lock(energy_mutex_);
-        pt_total += persisted_prompt_tokens + persisted_cached_tokens;
-        pt_cache += persisted_cached_tokens;
-        pt_out   += persisted_output_tokens;
+    nlohmann::json days = nlohmann::json::object();
+    for (const auto& [key, ws] : daily_ws_copy) {
+        days[key] = {{"wh", ws / 3600.0}, {"kwh", ws / 3.6e6},
+                     {"cost_usd", ws / 3.6e6 * options_.electricity_rate_usd_per_kwh}};
     }
+    const double now_epoch = static_cast<double>(std::time(nullptr));
+    const std::time_t tt = static_cast<std::time_t>(now_epoch);
+    std::tm utc{};
+    gmtime_r(&tt, &utc);
+    char today_key[16];
+    std::snprintf(today_key, sizeof(today_key), "%04d-%02d-%02d",
+                  utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday);
+    const double today_ws = daily_ws_copy.count(today_key) ? daily_ws_copy.at(today_key) : 0.0;
+    const double today_cost = today_ws / 3.6e6 * options_.electricity_rate_usd_per_kwh;
+    const double today_cost_per_m =
+        pt_total ? today_cost / static_cast<double>(pt_total) * 1e6 : 0.0;
+    const double month_cost = month_ws / 3.6e6 * options_.electricity_rate_usd_per_kwh;
+
     nlohmann::json out{
         {"model", public_model_id_},
         {"uptime", {{"seconds", uptime_s},
@@ -912,8 +925,8 @@ void HttpServer::handle_usage(httplib::Response& res) const {
          {{"input",
            {{"total", pt_total},
             {"cache_hits", pt_cache},
-            {"cache_computed", stats.computed_prefill_tokens},
-            {"cache_hit_rate_pct", total_prompt ? 100.0 * pt_cache / pt_total : 0.0}}},
+            {"cache_computed", pt_total - pt_cache},
+            {"cache_hit_rate_pct", hit_rate}}},
           {"output", {{"total", pt_out}}},
           {"total", pt_total + pt_out}}},
         {"throughput",
@@ -949,57 +962,27 @@ void HttpServer::handle_usage(httplib::Response& res) const {
           {"kv_pressure_spills", stats.pressure_spill_pages},
           {"sessions_evicted", stats.pressure_private_owners_evicted},
           {"kv_pages_occupied", stats.device_main_kv_occupied_pages}}},
+        {"energy",
+         {{"rate_usd_per_kwh", options_.electricity_rate_usd_per_kwh},
+          {"today",
+           {{"wh", today_ws / 3600.0},
+            {"kwh", today_ws / 3.6e6},
+            {"cost_usd", today_cost},
+            {"tokens", pt_total},
+            {"cost_per_m_tokens_usd", today_cost_per_m}}},
+          {"rolling_30d",
+           {{"wh", month_ws / 3600.0},
+            {"kwh", month_ws / 3.6e6},
+            {"cost_usd", month_cost}}},
+          {"daily", std::move(days)},
+          {"note", "GPU power only (device 0). Excludes host CPU/RAM/fans and the "
+                   "second GPU. Sampled via NVML at stats-reporter cadence. "
+                   "cost_per_m_tokens_usd is blended (input+output combined); cached "
+                   "input dominates agent traffic so it understates per-output cost."}}},
     };
-    // Energy accounting: daily buckets (UTC) + rolling 30-day, cost at the
-    // configured electricity rate. Watt-seconds integrate power sampled by the
-    // stats reporter.
-    {
-        std::lock_guard lock(energy_mutex_);
-        const double rate = options_.electricity_rate_usd_per_kwh;
-        nlohmann::json days = nlohmann::json::object();
-        double daily_ws = 0.0;
-        for (const auto& [key, ws] : energy.daily_ws) {
-            days[key] = {
-                {"wh", ws / 3600.0},
-                {"kwh", ws / 3.6e6},
-                {"cost_usd", ws / 3.6e6 * rate},
-            };
-            daily_ws = ws; // keep last for today bucket
-        }
-        std::string today_key;
-        {
-            std::time_t tt = std::chrono::system_clock::to_time_t(
-                std::chrono::system_clock::now());
-            std::tm utc{};
-            gmtime_r(&tt, &utc);
-            char buf[16];
-            std::snprintf(buf, sizeof(buf), "%04d-%02d-%02d", utc.tm_year + 1900,
-                          utc.tm_mon + 1, utc.tm_mday);
-            today_key = buf;
-        }
-        const double today_ws = energy.daily_ws.count(today_key)
-                                    ? energy.daily_ws.at(today_key)
-                                    : 0.0;
-        const double month_ws = energy.month_ws;
-        out["energy"] = {
-            {"rate_usd_per_kwh", rate},
-            {"today",
-             {{"wh", today_ws / 3600.0},
-              {"kwh", today_ws / 3.6e6},
-              {"cost_usd", today_ws / 3.6e6 * rate}}},
-            {"rolling_30d",
-             {{"wh", month_ws / 3600.0},
-              {"kwh", month_ws / 3.6e6},
-              {"cost_usd", month_ws / 3.6e6 * rate}}},
-            {"daily", std::move(days)},
-            {"note", "GPU power only (device 0). Excludes host CPU/RAM/fans and "
-                     "the second GPU. Sampled via NVML at stats-reporter cadence."}};
-    }
     res.set_header("Cache-Control", "no-store");
     res.set_content(out.dump(2), "application/json");
 }
-
-
 
 bool HttpServer::bind() { return server_.bind_to_port(options_.host, options_.port); }
 
