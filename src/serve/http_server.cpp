@@ -359,9 +359,14 @@ void HttpServer::persist_metrics_state() {
                                         : std::string());
     if (path.empty()) { return; }
     std::lock_guard lock(energy_mutex_);
+    nlohmann::json daily_tokens_json = nlohmann::json::object();
+    for (const auto& [key, count] : energy.daily_tokens) {
+        daily_tokens_json[key] = count;
+    }
     nlohmann::json j{
-        {"schema", 1},
+        {"schema", 2},
         {"daily_ws", energy.daily_ws},
+        {"daily_tokens", daily_tokens_json},
         {"persisted_prompt_tokens", persisted_prompt_tokens},
         {"persisted_cached_tokens", persisted_cached_tokens},
         {"persisted_output_tokens", persisted_output_tokens},
@@ -395,6 +400,11 @@ void HttpServer::restore_metrics_state() {
             for (auto it = j["daily_ws"].begin(); it != j["daily_ws"].end(); ++it) {
                 energy.daily_ws[it.key()] = it.value().get<double>();
             }
+            if (j.contains("daily_tokens")) {
+                for (auto it = j["daily_tokens"].begin(); it != j["daily_tokens"].end(); ++it) {
+                    energy.daily_tokens[it.key()] = it.value().get<std::uint64_t>();
+                }
+            }
             persisted_prompt_tokens = j.value("persisted_prompt_tokens", 0ULL);
             persisted_cached_tokens = j.value("persisted_cached_tokens", 0ULL);
             persisted_output_tokens = j.value("persisted_output_tokens", 0ULL);
@@ -420,6 +430,7 @@ void HttpServer::record_energy(double tokens, double interval_s, double avg_watt
     const double ws = avg_watts * interval_s;
     std::lock_guard lock(energy_mutex_);
     energy.daily_ws[day_key] += ws;
+    energy.daily_tokens[day_key] += static_cast<std::uint64_t>(tokens);
     energy.tokens_total += static_cast<std::uint64_t>(tokens);
     if (energy.tokens_today_key != day_key) { energy.tokens_today = 0; energy.tokens_today_key = day_key; }
     energy.tokens_today += static_cast<std::uint64_t>(tokens);
@@ -913,9 +924,16 @@ void HttpServer::handle_usage(httplib::Response& res) const {
                   utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday);
     const double today_ws = daily_ws_copy.count(today_key) ? daily_ws_copy.at(today_key) : 0.0;
     const double today_cost = today_ws / 3.6e6 * options_.electricity_rate_usd_per_kwh;
-    const double today_cost_per_m =
-        pt_total ? today_cost / static_cast<double>(pt_total) * 1e6 : 0.0;
     const double month_cost = month_ws / 3.6e6 * options_.electricity_rate_usd_per_kwh;
+    std::uint64_t tokens_today = 0;
+    double tokens_30d = 0.0;
+    {
+        std::lock_guard lock(energy_mutex_);
+        tokens_today = energy.tokens_today;
+        for (const auto& [key, count] : energy.daily_tokens) {
+            tokens_30d += static_cast<double>(count);
+        }
+    }
 
     nlohmann::json out{
         {"model", public_model_id_},
@@ -968,12 +986,16 @@ void HttpServer::handle_usage(httplib::Response& res) const {
            {{"wh", today_ws / 3600.0},
             {"kwh", today_ws / 3.6e6},
             {"cost_usd", today_cost},
-            {"tokens", pt_total},
-            {"cost_per_m_tokens_usd", today_cost_per_m}}},
+            {"tokens", tokens_today},
+            {"cost_per_m_tokens_usd",
+             tokens_today ? today_cost / tokens_today * 1e6 : 0.0}}},
           {"rolling_30d",
            {{"wh", month_ws / 3600.0},
             {"kwh", month_ws / 3.6e6},
-            {"cost_usd", month_cost}}},
+            {"cost_usd", month_cost},
+            {"tokens", static_cast<std::uint64_t>(tokens_30d)},
+            {"cost_per_m_tokens_usd",
+             tokens_30d ? month_cost / tokens_30d * 1e6 : 0.0}}},
           {"daily", std::move(days)},
           {"note", "Measures the NVML device this process runs on (device 0). "
                    "Excludes host components (CPU, RAM, cooling) and any other "

@@ -106,6 +106,8 @@ private:
     struct EnergyBuckets {
         // Watt-seconds integrated per calendar bucket (UTC day keys).
         std::map<std::string, double> daily_ws;
+        // Tokens served per calendar bucket (same keys as daily_ws).
+        std::map<std::string, std::uint64_t> daily_tokens;
         // Tokens served (record_energy is called once per reporter window with the
         // window's token count; daily attribution is approximate).
         std::uint64_t tokens_total = 0;
