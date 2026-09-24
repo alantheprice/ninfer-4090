@@ -910,10 +910,28 @@ void HttpServer::handle_usage(httplib::Response& res) const {
     const int hours   = static_cast<int>(uptime_s / 3600);
     const int minutes = static_cast<int>(uptime_s / 60) % 60;
 
+    std::uint64_t tokens_today = 0;
+    double tokens_30d = 0.0;
+    std::map<std::string, std::uint64_t> daily_tokens_copy;
+    {
+        std::lock_guard lock(energy_mutex_);
+        tokens_today = energy.tokens_today;
+        daily_tokens_copy = energy.daily_tokens;
+        for (const auto& [key, count] : energy.daily_tokens) {
+            tokens_30d += static_cast<double>(count);
+        }
+    }
     nlohmann::json days = nlohmann::json::object();
     for (const auto& [key, ws] : daily_ws_copy) {
-        days[key] = {{"wh", ws / 3600.0}, {"kwh", ws / 3.6e6},
-                     {"cost_usd", ws / 3.6e6 * options_.electricity_rate_usd_per_kwh}};
+        const std::uint64_t day_tokens =
+            daily_tokens_copy.count(key) ? daily_tokens_copy.at(key) : 0;
+        const double day_cost = ws / 3.6e6 * options_.electricity_rate_usd_per_kwh;
+        days[key] = {{"wh", ws / 3600.0},
+                     {"kwh", ws / 3.6e6},
+                     {"cost_usd", day_cost},
+                     {"tokens", day_tokens},
+                     {"cost_per_m_tokens_usd",
+                      day_tokens ? day_cost / static_cast<double>(day_tokens) * 1e6 : 0.0}};
     }
     const double now_epoch = static_cast<double>(std::time(nullptr));
     const std::time_t tt = static_cast<std::time_t>(now_epoch);
@@ -925,15 +943,6 @@ void HttpServer::handle_usage(httplib::Response& res) const {
     const double today_ws = daily_ws_copy.count(today_key) ? daily_ws_copy.at(today_key) : 0.0;
     const double today_cost = today_ws / 3.6e6 * options_.electricity_rate_usd_per_kwh;
     const double month_cost = month_ws / 3.6e6 * options_.electricity_rate_usd_per_kwh;
-    std::uint64_t tokens_today = 0;
-    double tokens_30d = 0.0;
-    {
-        std::lock_guard lock(energy_mutex_);
-        tokens_today = energy.tokens_today;
-        for (const auto& [key, count] : energy.daily_tokens) {
-            tokens_30d += static_cast<double>(count);
-        }
-    }
 
     nlohmann::json out{
         {"model", public_model_id_},
