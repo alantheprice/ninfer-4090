@@ -2,6 +2,7 @@
 
 #include "serve/anthropic_schema.h"
 #include "serve/console_log.h"
+#include "serve/gpu_power_sampler.h"
 #include "serve/openai_schema.h"
 #include "serve/request_log.h"
 #include "serve/translate.h"
@@ -11,6 +12,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <ctime>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -134,6 +137,35 @@ void HttpServer::log_request_done(const RequestLogContext& context,
     request_jsonl_.write_request_done(context, outcome);
     metrics_.end_request(context.id);
     metrics_.record(outcome);
+    // Exact per-request token attribution into the daily energy buckets (UTC
+    // day of completion). Prompt tokens count cache hits too: cached tokens
+    // were at some point prefilled by this GPU and reused them cheaply, but
+    // energy billing follows the usage view, not the compute view.
+    {
+        const std::uint64_t prompt = outcome.prompt_tokens > 0
+                                         ? static_cast<std::uint64_t>(outcome.prompt_tokens)
+                                         : 0;
+        const std::uint64_t output =
+            outcome.completion_tokens > 0
+                ? static_cast<std::uint64_t>(outcome.completion_tokens +
+                                             outcome.reasoning_tokens)
+                : 0;
+        const std::chrono::time_point now_utc =
+            std::chrono::time_point_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now());
+        const std::time_t tt = std::chrono::system_clock::to_time_t(now_utc);
+        std::tm utc{};
+        gmtime_r(&tt, &utc);
+        char day_key[16];
+        std::snprintf(day_key, sizeof(day_key), "%04d-%02d-%02d", utc.tm_year + 1900,
+                      utc.tm_mon + 1, utc.tm_mday);
+        std::lock_guard lock(energy_mutex_);
+        energy_.daily_tokens[day_key] += prompt + output;
+        energy_.tokens_total += prompt + output;
+        energy_.persisted_prompt_tokens += prompt;
+        energy_.persisted_cached_tokens += outcome.metrics.prefix_cache_hit_tokens;
+        energy_.persisted_output_tokens += output;
+    }
 }
 
 void HttpServer::log_request_error(const RequestLogContext& context, const std::string& message) {
@@ -147,23 +179,141 @@ void HttpServer::log_throughput(const ThroughputReport& report) {
     request_jsonl_.write_throughput(report);
 }
 
+void HttpServer::record_energy(double interval_s, double avg_watts) {
+    if (interval_s <= 0.0) { return; }
+    const double ws = avg_watts * interval_s;
+
+    const std::chrono::time_point now_utc =
+        std::chrono::time_point_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now());
+    const std::time_t tt = std::chrono::system_clock::to_time_t(now_utc);
+    std::tm utc{};
+    gmtime_r(&tt, &utc);
+    char day_key[16];
+    std::snprintf(day_key, sizeof(day_key), "%04d-%02d-%02d", utc.tm_year + 1900,
+                  utc.tm_mon + 1, utc.tm_mday);
+
+    std::lock_guard lock(energy_mutex_);
+    energy_.daily_ws[day_key] += ws;
+    // Rolling 30-day = sum of retained daily buckets (prune older than 31 days).
+    static constexpr int kRetainDays = 31;
+    if (energy_.daily_ws.size() > static_cast<std::size_t>(kRetainDays)) {
+        for (auto it = energy_.daily_ws.begin();
+             it != energy_.daily_ws.end() &&
+             static_cast<int>(energy_.daily_ws.size()) > kRetainDays;) {
+            it = energy_.daily_ws.erase(it);
+        }
+    }
+    if (energy_.daily_tokens.size() > static_cast<std::size_t>(kRetainDays)) {
+        for (auto it = energy_.daily_tokens.begin();
+             it != energy_.daily_tokens.end() &&
+             static_cast<int>(energy_.daily_tokens.size()) > kRetainDays;) {
+            it = energy_.daily_tokens.erase(it);
+        }
+    }
+    double month = 0.0;
+    for (const auto& [key, ws_val] : energy_.daily_ws) { month += ws_val; }
+    energy_.month_ws = month;
+}
+
+std::string HttpServer::metrics_state_path() const {
+    if (!options_.metrics_state_path.empty()) { return options_.metrics_state_path; }
+    if (!options_.request_log_jsonl.empty()) {
+        return options_.request_log_jsonl + ".metrics-state.json";
+    }
+    return {};
+}
+
+void HttpServer::persist_metrics_state() {
+    const std::string path = metrics_state_path();
+    if (path.empty()) { return; }
+    std::lock_guard lock(energy_mutex_);
+    nlohmann::json j{
+        {"schema", 2},
+        {"daily_ws", energy_.daily_ws},
+        {"daily_tokens", energy_.daily_tokens},
+        {"persisted_prompt_tokens", energy_.persisted_prompt_tokens},
+        {"persisted_cached_tokens", energy_.persisted_cached_tokens},
+        {"persisted_output_tokens", energy_.persisted_output_tokens},
+    };
+    const std::string tmp = path + ".tmp";
+    if (FILE* f = fopen(tmp.c_str(), "w")) {
+        fputs(j.dump().c_str(), f);
+        fclose(f);
+        rename(tmp.c_str(), path.c_str());
+    }
+}
+
+void HttpServer::restore_metrics_state() {
+    const std::string path = metrics_state_path();
+    if (path.empty()) { return; }
+    FILE* f = fopen(path.c_str(), "r");
+    if (f == nullptr) { return; }
+    std::string buf;
+    char chunk[8192];
+    std::size_t n = 0;
+    while ((n = fread(chunk, 1, sizeof(chunk), f)) > 0) { buf.append(chunk, n); }
+    fclose(f);
+    try {
+        const auto j = nlohmann::json::parse(buf);
+        std::lock_guard lock(energy_mutex_);
+        for (auto it = j["daily_ws"].begin(); it != j["daily_ws"].end(); ++it) {
+            energy_.daily_ws[it.key()] = it.value().get<double>();
+        }
+        if (j.contains("daily_tokens")) {
+            for (auto it = j["daily_tokens"].begin(); it != j["daily_tokens"].end(); ++it) {
+                energy_.daily_tokens[it.key()] = it.value().get<std::uint64_t>();
+            }
+        }
+        energy_.persisted_prompt_tokens = j.value("persisted_prompt_tokens", 0ULL);
+        energy_.persisted_cached_tokens = j.value("persisted_cached_tokens", 0ULL);
+        energy_.persisted_output_tokens = j.value("persisted_output_tokens", 0ULL);
+        std::fprintf(stderr, "[metrics] state restored from %s\n", path.c_str());
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "[metrics] state restore failed: %s\n", e.what());
+    }
+}
+
 void HttpServer::run_stats_reporter() {
     using Clock                     = std::chrono::steady_clock;
     ninfer::RuntimeStats previous   = service_->runtime_stats();
     Clock::time_point previous_time = Clock::now();
     const auto interval             = std::chrono::milliseconds(options_.log_stats_interval_ms);
+    // Power is sampled on the board this process actually runs on
+    // (ServeOptions::device resolved through its PCI bus ID).
+    GpuPowerSampler power_sampler(options_.device);
+    double window_watt_seconds = 0.0;
+    double window_seconds_sum  = 0.0;
+    long   reporter_ticks      = 0;
+    auto    window_started     = Clock::now();
 
     for (;;) {
         {
             std::unique_lock lock(stats_mutex_);
-            if (stats_cv_.wait_for(lock, interval, [this] { return stats_stopping_; })) { break; }
+            if (stats_cv_.wait_for(lock, interval, [this] { return stats_stopping_; })) {
+                break;
+            }
         }
+
+        // Sub-sample power twice per window (start and end); trapezoid over the pair.
+        power_sampler.sample();
+        const unsigned int mw_start = power_sampler.last_milliwatts;
 
         const ninfer::RuntimeStats current = service_->runtime_stats();
         const Clock::time_point now        = Clock::now();
+        power_sampler.sample();
+        const unsigned int mw_end = power_sampler.last_milliwatts;
+        const double window_s     = std::chrono::duration<double>(now - window_started).count();
+        window_seconds_sum += window_s;
+        window_watt_seconds += ((mw_start + mw_end) / 2.0 / 1000.0) * window_s;
+        window_started = now;
         const ThroughputReport report      = make_throughput_report(
             previous, current, std::chrono::duration<double>(now - previous_time).count());
         if (report_has_activity(report)) { log_throughput(report); }
+        const double window_avg_watts =
+            window_seconds_sum > 0.0 ? window_watt_seconds / window_seconds_sum : 0.0;
+        record_energy(window_s, window_avg_watts);
+        if (++reporter_ticks % 12 == 0) { persist_metrics_state(); }
         previous      = current;
         previous_time = now;
     }
@@ -186,6 +336,7 @@ void HttpServer::stop_stats_reporter() {
     }
     stats_cv_.notify_one();
     stats_thread_.join();
+    persist_metrics_state();
 }
 
 void HttpServer::register_routes() {
@@ -269,6 +420,9 @@ void HttpServer::register_routes() {
     });
     server_.Get("/metrics", [this](const httplib::Request&, httplib::Response& res) {
         res.set_content(metrics_.render(options_.max_concurrency), "text/plain; version=0.0.4");
+    });
+    server_.Get("/usage", [this](const httplib::Request&, httplib::Response& res) {
+        handle_usage(res);
     });
     // llama.cpp-shaped slot detail. The Engine has no exposed slot table, so
     // the first `max_concurrency` in-flight requests (FIFO order) count as
@@ -450,6 +604,107 @@ void HttpServer::handle_model(const httplib::Request& req, httplib::Response& re
     res.set_content(make_model_object(id.empty() ? public_model_id_ : id, unix_time_now(),
                                       options_.max_context, options_.enable_vision),
                     "application/json");
+}
+
+void HttpServer::handle_usage(httplib::Response& res) const {
+    using Clock  = std::chrono::steady_clock;
+    static const Clock::time_point process_start = Clock::now();
+    if (service_ == nullptr) {
+        res.status = 503;
+        res.set_content(R"({"error":"service not attached"})", "application/json");
+        return;
+    }
+    const double uptime_s =
+        std::chrono::duration<double>(Clock::now() - process_start).count();
+
+    // Copy everything under short lock scopes; build the response afterwards.
+    // The persisted_* counters accumulate every completed request (baseline
+    // from previous runs + this run), so they alone are the token totals.
+    std::uint64_t pt_total = 0, pt_cache = 0, pt_out = 0;
+    std::map<std::string, double> daily_ws_copy;
+    std::map<std::string, std::uint64_t> daily_tokens_copy;
+    double month_ws = 0.0;
+    {
+        std::lock_guard lock(energy_mutex_);
+        pt_total  = energy_.persisted_prompt_tokens;
+        pt_cache  = energy_.persisted_cached_tokens;
+        pt_out    = energy_.persisted_output_tokens;
+        daily_ws_copy = energy_.daily_ws;
+        daily_tokens_copy = energy_.daily_tokens;
+        month_ws  = energy_.month_ws;
+    }
+
+    const int hours   = static_cast<int>(uptime_s / 3600);
+    const int minutes = static_cast<int>(uptime_s / 60) % 60;
+
+    nlohmann::json days = nlohmann::json::object();
+    for (const auto& [key, ws] : daily_ws_copy) {
+        const std::uint64_t day_tokens =
+            daily_tokens_copy.count(key) ? daily_tokens_copy.at(key) : 0;
+        const double day_cost = ws / 3.6e6 * options_.electricity_rate_usd_per_kwh;
+        days[key] = {{"wh", ws / 3600.0},
+                     {"kwh", ws / 3.6e6},
+                     {"cost_usd", day_cost},
+                     {"tokens", day_tokens},
+                     {"cost_per_m_tokens_usd",
+                      day_tokens ? day_cost / static_cast<double>(day_tokens) * 1e6 : 0.0}};
+    }
+
+    const double now_epoch = static_cast<double>(std::time(nullptr));
+    const std::time_t tt = static_cast<std::time_t>(now_epoch);
+    std::tm utc{};
+    gmtime_r(&tt, &utc);
+    char today_key[16];
+    std::snprintf(today_key, sizeof(today_key), "%04d-%02d-%02d",
+                  utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday);
+    const double today_ws = daily_ws_copy.count(today_key) ? daily_ws_copy.at(today_key) : 0.0;
+    const std::uint64_t tokens_today =
+        daily_tokens_copy.count(today_key) ? daily_tokens_copy.at(today_key) : 0;
+    const double today_cost = today_ws / 3.6e6 * options_.electricity_rate_usd_per_kwh;
+    const double month_cost = month_ws / 3.6e6 * options_.electricity_rate_usd_per_kwh;
+    std::uint64_t tokens_30d = 0;
+    for (const auto& [key, count] : daily_tokens_copy) {
+        tokens_30d += count;
+    }
+
+    nlohmann::json out{
+        {"model", public_model_id_},
+        {"uptime", {{"seconds", uptime_s},
+                    {"human", std::to_string(hours) + "h " + std::to_string(minutes) + "m"}}},
+        {"tokens",
+         {{"input",
+           {{"total", pt_total},
+            {"cache_hits", pt_cache},
+            {"cache_computed", pt_total - pt_cache}}},
+          {"output", {{"total", pt_out}}},
+          {"total", pt_total + pt_out}}},
+        {"requests",
+         {{"total", metrics_.requests_total()}}},
+        {"energy",
+         {{"rate_usd_per_kwh", options_.electricity_rate_usd_per_kwh},
+          {"today",
+           {{"wh", today_ws / 3600.0},
+            {"kwh", today_ws / 3.6e6},
+            {"cost_usd", today_cost},
+            {"tokens", tokens_today},
+            {"cost_per_m_tokens_usd",
+             tokens_today ? today_cost / static_cast<double>(tokens_today) * 1e6 : 0.0}}},
+          {"rolling_30d",
+           {{"kwh", month_ws / 3.6e6},
+            {"cost_usd", month_cost},
+            {"tokens", tokens_30d},
+            {"cost_per_m_tokens_usd",
+             tokens_30d ? month_cost / static_cast<double>(tokens_30d) * 1e6 : 0.0}}},
+          {"daily", std::move(days)},
+          {"note", "Measures the NVML device this process runs on (its CUDA "
+                   "device resolved via PCI bus ID). Excludes host components "
+                   "(CPU, RAM, cooling) and any other GPUs. Sampled via NVML "
+                   "at stats-reporter cadence. cost_per_m_tokens_usd is "
+                   "blended (input+output combined); the true split depends "
+                   "on cache hit rate and output share."}}},
+    };
+    res.set_header("Cache-Control", "no-store");
+    res.set_content(out.dump(2), "application/json");
 }
 
 void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::Response& res) {
@@ -914,6 +1169,7 @@ void HttpServer::attach(GenerationService& service) {
     service_                       = &service;
     request_jsonl_.write_server_start(options_, service.sampling_defaults(), public_model_id_, load,
                                       service.memory_summary());
+    restore_metrics_state();
 }
 
 bool HttpServer::listen() {

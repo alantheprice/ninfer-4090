@@ -44,6 +44,12 @@ public:
     // matching the FIFO scheduler's work-conserving behavior.
     [[nodiscard]] std::string render(std::uint32_t max_concurrency) const;
 
+    // Lifetime admitted-request count, for the /usage summary.
+    [[nodiscard]] std::uint64_t requests_total() const {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        return requests_total_;
+    }
+
 private:
     mutable std::mutex mutex_;
     std::uint64_t requests_total_                    = 0;

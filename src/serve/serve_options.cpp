@@ -81,6 +81,8 @@ std::string serve_usage_text(const char* argv0) {
            "  --model-id <ID>             Override model identifier in /v1/models (default: artifact identity.model_id)\n"
            "  --max-request-mib <N>       Maximum incoming request payload size in MiB (default: 384, enforced before parsing)\n"
            "  --request-log-jsonl <FILE>  Append full-precision server request and telemetry records to JSONL file\n"
+           "  --metrics-state <FILE>      Persist energy/token accounting across restarts (default: <request-log>.metrics-state.json)\n"
+           "  --electricity-rate <R>      Electricity price in USD per kWh for the /usage energy report (default: 0.15)\n"
            "  --log-stats-interval-ms <N> Periodic throughput and engine stats logging interval in ms (default: 5000; 0 disables)\n\n"
            "Concurrency & Ingress:\n"
            "  --max-concurrency <N>       Maximum active parallel decode slots (1 to 8, default: 1)\n"
@@ -210,6 +212,17 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.request_log_jsonl = require_value("--request-log-jsonl");
             if (options.request_log_jsonl.empty()) {
                 throw std::invalid_argument("--request-log-jsonl must not be empty");
+            }
+        } else if (arg == "--metrics-state") {
+            options.metrics_state_path = require_value("--metrics-state");
+            if (options.metrics_state_path.empty()) {
+                throw std::invalid_argument("--metrics-state must not be empty");
+            }
+        } else if (arg == "--electricity-rate") {
+            options.electricity_rate_usd_per_kwh =
+                std::stod(require_value("--electricity-rate"));
+            if (!(options.electricity_rate_usd_per_kwh >= 0.0)) {
+                throw std::invalid_argument("--electricity-rate must be non-negative");
             }
         } else if (arg == "--response-store-max-records") {
             const int records = parse_nonnegative_int(require_value("--response-store-max-records"),

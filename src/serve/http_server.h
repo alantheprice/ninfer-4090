@@ -12,6 +12,7 @@
 #include <condition_variable>
 #include <chrono>
 #include <cstdint>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -45,6 +46,7 @@ private:
     void handle_response_compact(const httplib::Request& req, httplib::Response& res);
     void handle_models(const httplib::Request& req, httplib::Response& res) const;
     void handle_model(const httplib::Request& req, httplib::Response& res) const;
+    void handle_usage(httplib::Response& res) const;
 
     // The process-wide console logger serializes lines from request and reporter threads.
     void log_line(const std::string& line);
@@ -52,8 +54,28 @@ private:
     void log_request_done(const RequestLogContext& context, const GenerationOutcome& outcome);
     void log_request_error(const RequestLogContext& context, const std::string& message);
     void log_throughput(const ThroughputReport& report);
+    void record_energy(double interval_s, double avg_watts);
     void run_stats_reporter();
     void stop_stats_reporter();
+    void persist_metrics_state();
+    void restore_metrics_state();
+    [[nodiscard]] std::string metrics_state_path() const;
+
+    struct EnergyBuckets {
+        // Watt-seconds integrated per calendar bucket (UTC day keys).
+        std::map<std::string, double> daily_ws;
+        // Tokens served per calendar bucket (same keys as daily_ws); filled
+        // from per-request attribution, so the split is exact across UTC
+        // midnight rollovers.
+        std::map<std::string, std::uint64_t> daily_tokens;
+        // Lifetime token counters (this process + persisted baseline).
+        std::uint64_t tokens_total = 0;
+        std::uint64_t persisted_prompt_tokens = 0;
+        std::uint64_t persisted_cached_tokens = 0;
+        std::uint64_t persisted_output_tokens = 0;
+        // Rolling 30-day energy total (recomputed from daily buckets).
+        double month_ws = 0.0;
+    };
 
     GenerationService* service_ = nullptr;
     ServeOptions options_;
@@ -67,6 +89,9 @@ private:
     std::condition_variable stats_cv_;
     std::thread stats_thread_;
     bool stats_stopping_ = false;
+
+    mutable std::mutex energy_mutex_;
+    EnergyBuckets energy_;
 };
 
 } // namespace ninfer::serve
